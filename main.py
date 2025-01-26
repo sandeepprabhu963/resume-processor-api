@@ -89,23 +89,41 @@ def optimize_resume_content(resume_text: str, job_description: str) -> Dict[str,
             messages=[
                 {
                     "role": "system",
-                    "content": """You are an expert resume optimizer. Your task is to:
-                    1. Carefully analyze both the resume content and job description
-                    2. Identify key requirements, skills, and qualifications from the job description
-                    3. Modify the resume content to:
-                       - Highlight relevant experience and skills that match job requirements
-                       - Use strong action verbs and quantifiable achievements
-                       - Incorporate relevant keywords from the job description naturally
-                       - Maintain professional tone and formatting
-                    4. Keep the exact same structure and sections as the original resume
-                    5. Return a valid JSON object where:
-                       - Each key exactly matches a section or field from the original resume
-                       - Each value is the optimized content for that section
-                       - All content is properly formatted with correct punctuation and spacing
-                    6. Ensure all dates, company names, and education details remain unchanged
-                    7. Focus on enhancing descriptions and achievements to align with the job
-                    
-                    Important: The output must be a properly formatted JSON with all keys and values as strings."""
+                    "content": """You are an expert ATS-optimized resume writer. Your task is to:
+
+1. Analyze the job description thoroughly to identify:
+   - Key technical skills and tools required
+   - Soft skills and qualifications needed
+   - Core responsibilities and deliverables
+   - Industry-specific keywords and terminology
+
+2. Review the resume content and:
+   - Highlight experiences that directly match job requirements
+   - Incorporate identified keywords naturally into bullet points
+   - Quantify achievements where possible (%, $, numbers)
+   - Use strong action verbs aligned with job responsibilities
+   - Ensure technical terms match those in the job description
+   - Maintain professional tone and clarity
+
+3. Important formatting rules:
+   - Keep the EXACT same structure as the original resume
+   - Maintain all section headings exactly as they appear
+   - Preserve all dates, company names, and titles
+   - Return a valid JSON where each key matches original sections
+   - Ensure proper formatting with correct punctuation
+   - Keep education details unchanged
+
+4. Focus on:
+   - Making each bullet point directly relevant to the job
+   - Using industry-standard terminology from the job post
+   - Highlighting transferable skills when direct experience is missing
+   - Maintaining clear, concise language
+   - Ensuring ATS-friendly formatting
+
+Output must be a properly formatted JSON object where:
+- Each key exactly matches a section from the original resume
+- Each value contains the optimized content for that section
+- All formatting and structure remain identical to the original"""
                 },
                 {
                     "role": "user",
@@ -115,18 +133,17 @@ def optimize_resume_content(resume_text: str, job_description: str) -> Dict[str,
                     Job Description:
                     {job_description}
                     
-                    Please optimize this resume for the job while maintaining its exact structure."""
+                    Please optimize this resume for the job while maintaining its exact structure and format."""
                 }
             ],
-            temperature=0.5,
-            max_tokens=2000
+            temperature=0.7,
+            max_tokens=2500
         )
         
         optimized_content = response.choices[0].message.content
         print("Received response from OpenAI, attempting to parse JSON...")
         
         try:
-            # Try to parse the JSON response
             parsed_content = json.loads(optimized_content)
             return parsed_content
         except json.JSONDecodeError as e:
