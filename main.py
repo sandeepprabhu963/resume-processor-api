@@ -14,16 +14,17 @@ load_dotenv()
 # Initialize FastAPI app
 app = FastAPI(title="Resume Optimizer API")
 
-# Configure CORS
+# Configure CORS with more specific settings
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],  # In production, you should list specific origins
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    max_age=3600,  # Cache preflight requests for 1 hour
 )
 
-# Initialize OpenAI client with error handling
+# Initialize OpenAI client
 api_key = os.getenv("OPENAI_API_KEY")
 if not api_key:
     raise ValueError("OPENAI_API_KEY environment variable is not set")
@@ -36,7 +37,7 @@ async def process_resume(
     job_description: str = Form(...)
 ):
     try:
-        # Read the uploaded document
+        # Read the uploaded document with timeout handling
         content = await file.read()
         doc = Document(BytesIO(content))
         
@@ -68,7 +69,8 @@ async def process_resume(
                     "content": f"Original Resume:\n{original_text}\n\nJob Description:\n{job_description}\n\nOptimize this resume for the job while maintaining exact structure and format."
                 }
             ],
-            temperature=0.3
+            temperature=0.3,
+            timeout=60  # Set a 60-second timeout for the OpenAI request
         )
         
         optimized_content = response.choices[0].message.content
@@ -86,18 +88,24 @@ async def process_resume(
         new_doc.save(doc_io)
         doc_io.seek(0)
         
-        # Return the document
+        # Return the document with appropriate headers
         return StreamingResponse(
             doc_io,
             media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             headers={
-                "Content-Disposition": f"attachment; filename=optimized_{file.filename}"
+                "Content-Disposition": f"attachment; filename=optimized_{file.filename}",
+                "Access-Control-Expose-Headers": "Content-Disposition"
             }
         )
         
     except Exception as e:
         print(f"Error processing resume: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.options("/process-resume/")
+async def options_process_resume():
+    # Handle OPTIONS requests explicitly
+    return {"message": "OK"}
 
 @app.get("/health")
 async def health_check():
@@ -106,4 +114,12 @@ async def health_check():
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=port,
+        timeout_keep_alive=65,
+        timeout_notify=60,
+        limit_concurrency=10,
+        backlog=128
+    )
