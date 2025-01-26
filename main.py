@@ -29,7 +29,8 @@ api_key = os.getenv("OPENAI_API_KEY")
 if not api_key:
     raise ValueError("OPENAI_API_KEY environment variable is not set")
 
-client = OpenAI(api_key=api_key)
+# Initialize OpenAI client without any additional configuration
+client = OpenAI()
 
 @app.post("/process-resume/")
 async def process_resume(
@@ -124,7 +125,6 @@ if __name__ == "__main__":
         "main:app",
         host="0.0.0.0",
         port=port,
-        workers=4,
-        timeout_keep_alive=75,
+        workers=1,
         log_level="info"
     )
