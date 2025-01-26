@@ -148,8 +148,14 @@ async def process_resume(
         print("OpenAI response received")
         
         # Parse the optimized content
-        optimized_sections = json.loads(response.choices[0].message.content)
-        resume_json["sections"] = optimized_sections
+        optimized_content = response.choices[0].message.content
+        try:
+            optimized_sections = json.loads(optimized_content)
+            resume_json["sections"] = optimized_sections
+        except json.JSONDecodeError as e:
+            print(f"JSON parsing error: {str(e)}")
+            print(f"Raw content: {optimized_content}")
+            raise HTTPException(status_code=500, detail="Failed to parse optimized content")
         
         # Convert back to docx
         optimized_doc = json_to_docx(resume_json, doc)
