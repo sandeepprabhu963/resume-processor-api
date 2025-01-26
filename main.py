@@ -14,7 +14,7 @@ load_dotenv()
 # Initialize FastAPI app
 app = FastAPI(title="Resume Optimizer API")
 
-# Configure CORS - Allow all origins for development
+# Configure CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -29,8 +29,13 @@ api_key = os.getenv("OPENAI_API_KEY")
 if not api_key:
     raise ValueError("OPENAI_API_KEY environment variable is not set")
 
-# Initialize OpenAI client without any additional configuration
-client = OpenAI()
+# Initialize OpenAI client with explicit configuration
+client = OpenAI(
+    api_key=api_key,
+    base_url="https://api.openai.com/v1",
+    timeout=60.0,
+    max_retries=2
+)
 
 @app.post("/process-resume/")
 async def process_resume(
