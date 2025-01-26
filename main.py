@@ -89,25 +89,41 @@ def optimize_resume_content(resume_text: str, job_description: str) -> Dict[str,
             messages=[
                 {
                     "role": "system",
-                    "content": """You are a professional resume optimizer. Your task is to:
-                    1. Analyze the resume content and job description
-                    2. Enhance the resume content while maintaining the exact same structure
-                    3. Return a valid JSON object where:
-                       - Each key is a section or field from the original resume
+                    "content": """You are an expert resume optimizer. Your task is to:
+                    1. Carefully analyze both the resume content and job description
+                    2. Identify key requirements, skills, and qualifications from the job description
+                    3. Modify the resume content to:
+                       - Highlight relevant experience and skills that match job requirements
+                       - Use strong action verbs and quantifiable achievements
+                       - Incorporate relevant keywords from the job description naturally
+                       - Maintain professional tone and formatting
+                    4. Keep the exact same structure and sections as the original resume
+                    5. Return a valid JSON object where:
+                       - Each key exactly matches a section or field from the original resume
                        - Each value is the optimized content for that section
-                    4. Ensure the output is properly formatted JSON with quotes around keys and values"""
+                       - All content is properly formatted with correct punctuation and spacing
+                    6. Ensure all dates, company names, and education details remain unchanged
+                    7. Focus on enhancing descriptions and achievements to align with the job
+                    
+                    Important: The output must be a properly formatted JSON with all keys and values as strings."""
                 },
                 {
                     "role": "user",
-                    "content": f"Resume:\n{resume_text}\n\nJob Description:\n{job_description}"
+                    "content": f"""Original Resume:
+                    {resume_text}
+                    
+                    Job Description:
+                    {job_description}
+                    
+                    Please optimize this resume for the job while maintaining its exact structure."""
                 }
             ],
-            temperature=0.3
+            temperature=0.5,
+            max_tokens=2000
         )
         
         optimized_content = response.choices[0].message.content
         print("Received response from OpenAI, attempting to parse JSON...")
-        print(f"Raw response: {optimized_content}")
         
         try:
             # Try to parse the JSON response
