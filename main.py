@@ -2,7 +2,7 @@ from fastapi import FastAPI, File, UploadFile, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from docx import Document
-import openai
+from openai import OpenAI
 import os
 from io import BytesIO
 from typing import Optional
@@ -18,8 +18,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Configure OpenAI
-openai.api_key = os.getenv("OPENAI_API_KEY")
+# Initialize OpenAI client without proxies
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 @app.post("/process-resume/")
 async def process_resume(
@@ -39,9 +39,9 @@ async def process_resume(
         
         original_text = "\n".join(paragraphs)
         
-        # Process with OpenAI
-        response = openai.chat.completions.create(
-            model="gpt-4o",
+        # Process with OpenAI using gpt-4o-mini model
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
             messages=[
                 {
                     "role": "system",
