@@ -18,7 +18,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize OpenAI client without proxies
+# Initialize OpenAI client
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 @app.post("/process-resume/")
@@ -39,9 +39,9 @@ async def process_resume(
         
         original_text = "\n".join(paragraphs)
         
-        # Process with OpenAI using gpt-4o-mini model
+        # Process with OpenAI
         response = client.chat.completions.create(
-            model="gpt-4o-mini",
+            model="gpt-4",
             messages=[
                 {
                     "role": "system",
