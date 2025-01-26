@@ -111,6 +111,9 @@ async def process_resume(
     job_description: str = Form(...)
 ):
     try:
+        print(f"Processing resume: {file.filename}")
+        print(f"Job description length: {len(job_description)}")
+        
         # Read the uploaded document
         content = await file.read()
         doc = Document(BytesIO(content))
@@ -142,6 +145,8 @@ async def process_resume(
             temperature=0.3
         )
         
+        print("OpenAI response received")
+        
         # Parse the optimized content
         optimized_sections = json.loads(response.choices[0].message.content)
         resume_json["sections"] = optimized_sections
@@ -153,6 +158,8 @@ async def process_resume(
         doc_io = BytesIO()
         optimized_doc.save(doc_io)
         doc_io.seek(0)
+        
+        print("Document processed successfully")
         
         # Return the document with appropriate headers
         headers = {
