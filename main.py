@@ -105,6 +105,21 @@ def json_to_docx(json_data: Dict[str, Any], template_doc: Document) -> Document:
     
     return doc
 
+def clean_json_string(json_str: str) -> str:
+    """Clean and validate JSON string from OpenAI response."""
+    # Remove any potential markdown formatting
+    if json_str.startswith("```json"):
+        json_str = json_str.split("```json")[1]
+    if json_str.startswith("```"):
+        json_str = json_str.split("```")[1]
+    if json_str.endswith("```"):
+        json_str = json_str.rsplit("```", 1)[0]
+    
+    # Strip whitespace and newlines
+    json_str = json_str.strip()
+    
+    return json_str
+
 @app.post("/process-resume/")
 async def process_resume(
     file: UploadFile = File(...),
@@ -122,7 +137,7 @@ async def process_resume(
         resume_json = docx_to_json(doc)
         
         # Process with OpenAI
-        sections_prompt = json.dumps(resume_json["sections"])
+        sections_prompt = json.dumps(resume_json["sections"], indent=2)
         response = client.chat.completions.create(
             model="gpt-4",
             messages=[
@@ -133,13 +148,13 @@ async def process_resume(
                     2. Enhance each section's content to better match the job requirements
                     3. Maintain the exact same structure and section titles
                     4. Only modify the content within each section
-                    5. Return the optimized content in the exact same JSON format
+                    5. Return ONLY the optimized JSON array of sections, nothing else
                     6. Preserve all formatting markers and section organization
-                    Return only the optimized JSON structure."""
+                    The response must be a valid JSON array that can be parsed."""
                 },
                 {
                     "role": "user",
-                    "content": f"Resume Sections:\n{sections_prompt}\n\nJob Description:\n{job_description}\n\nOptimize these resume sections while maintaining exact structure and format."
+                    "content": f"Resume Sections:\n{sections_prompt}\n\nJob Description:\n{job_description}\n\nOptimize these resume sections while maintaining exact structure and format. Return only the JSON array."
                 }
             ],
             temperature=0.3
@@ -149,13 +164,19 @@ async def process_resume(
         
         # Parse the optimized content
         optimized_content = response.choices[0].message.content
+        print(f"Raw OpenAI response: {optimized_content}")
+        
+        # Clean and parse the JSON response
+        cleaned_content = clean_json_string(optimized_content)
         try:
-            optimized_sections = json.loads(optimized_content)
+            optimized_sections = json.loads(cleaned_content)
+            if not isinstance(optimized_sections, list):
+                raise ValueError("Expected JSON array of sections")
             resume_json["sections"] = optimized_sections
-        except json.JSONDecodeError as e:
+        except (json.JSONDecodeError, ValueError) as e:
             print(f"JSON parsing error: {str(e)}")
-            print(f"Raw content: {optimized_content}")
-            raise HTTPException(status_code=500, detail="Failed to parse optimized content")
+            print(f"Cleaned content: {cleaned_content}")
+            raise HTTPException(status_code=500, detail=f"Failed to parse optimized content: {str(e)}")
         
         # Convert back to docx
         optimized_doc = json_to_docx(resume_json, doc)
