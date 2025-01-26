@@ -41,13 +41,23 @@ client = OpenAI(
     max_retries=2
 )
 
-# Initialize Supabase client
+# Initialize Supabase client with better error handling
 supabase_url = os.getenv("SUPABASE_URL")
 supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
-if not supabase_url or not supabase_key:
-    raise ValueError("Supabase environment variables are not set")
 
-supabase: Client = create_client(supabase_url, supabase_key)
+if not supabase_url:
+    raise ValueError("SUPABASE_URL environment variable is not set")
+if not supabase_key:
+    raise ValueError("SUPABASE_SERVICE_ROLE_KEY environment variable is not set")
+
+try:
+    print(f"Initializing Supabase client with URL: {supabase_url}")
+    supabase: Client = create_client(supabase_url, supabase_key)
+    # Test the connection
+    supabase.auth.get_user("dummy-token")
+except Exception as e:
+    print(f"Error initializing Supabase client: {str(e)}")
+    raise ValueError(f"Failed to initialize Supabase client: {str(e)}")
 
 def extract_template_variables(doc: Document) -> Dict[str, str]:
     """Extract template variables from the document."""
@@ -66,7 +76,7 @@ def optimize_resume_content(resume_text: str, job_description: str) -> Dict[str,
     """Use OpenAI to optimize resume content based on job description."""
     try:
         response = client.chat.completions.create(
-            model="gpt-4o-mini",
+            model="gpt-4",
             messages=[
                 {
                     "role": "system",
