@@ -9,6 +9,9 @@ import os
 from io import BytesIO
 from typing import Dict, Any
 from dotenv import load_dotenv
+from datetime import datetime
+import base64
+from supabase import create_client, Client
 
 # Load environment variables
 load_dotenv()
@@ -38,87 +41,52 @@ client = OpenAI(
     max_retries=2
 )
 
-def docx_to_json(doc: Document) -> Dict[str, Any]:
-    """Convert a docx document to a structured JSON format."""
-    json_data = {
-        "sections": [],
-        "styles": {}
-    }
-    
-    current_section = {"title": "", "content": []}
-    
+# Initialize Supabase client
+supabase_url = os.getenv("SUPABASE_URL")
+supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+if not supabase_url or not supabase_key:
+    raise ValueError("Supabase environment variables are not set")
+
+supabase: Client = create_client(supabase_url, supabase_key)
+
+def extract_template_variables(doc: Document) -> Dict[str, str]:
+    """Extract template variables from the document."""
+    variables = {}
     for paragraph in doc.paragraphs:
-        # Store style information
-        style = paragraph.style.name
-        if style not in json_data["styles"]:
-            json_data["styles"][style] = {
-                "name": style,
-                "font": paragraph.style.font.name if paragraph.style.font else None,
-                "size": paragraph.style.font.size if paragraph.style.font else None,
-                "bold": paragraph.style.font.bold if paragraph.style.font else None,
-                "italic": paragraph.style.font.italic if paragraph.style.font else None
-            }
-        
-        # Detect section headers based on style or formatting
-        if paragraph.style.name.lower().startswith(('heading', 'title')):
-            if current_section["title"]:  # Save previous section
-                json_data["sections"].append(current_section)
-            current_section = {"title": paragraph.text, "content": [], "style": style}
-        else:
-            if paragraph.text.strip():
-                current_section["content"].append({
-                    "text": paragraph.text,
-                    "style": style
-                })
-    
-    # Add the last section
-    if current_section["title"] or current_section["content"]:
-        json_data["sections"].append(current_section)
-    
-    return json_data
+        text = paragraph.text
+        # Look for potential template variables (text between {{ and }})
+        if "{{" in text and "}}" in text:
+            var_start = text.find("{{")
+            var_end = text.find("}}")
+            var_name = text.strip()[var_start+2:var_end].strip()
+            variables[var_name] = ""
+    return variables
 
-def json_to_docx(json_data: Dict[str, Any], template_doc: Document) -> Document:
-    """Convert JSON back to a docx document while preserving formatting."""
-    doc = Document()
-    
-    # Copy styles from template
-    for style in template_doc.styles:
-        if style.name not in doc.styles:
-            try:
-                doc.styles.add_style(style.name, style.type)
-            except:
-                continue
-    
-    # Recreate document from JSON
-    for section in json_data["sections"]:
-        if section["title"]:
-            title_para = doc.add_paragraph(section["title"])
-            title_para.style = section.get("style", "Heading 1")
+def optimize_resume_content(resume_text: str, job_description: str) -> Dict[str, str]:
+    """Use OpenAI to optimize resume content based on job description."""
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": """You are a professional resume optimizer. Analyze the resume content 
+                    and job description to enhance the resume while maintaining the exact same structure 
+                    and format. Return a JSON object with the optimized content for each section."""
+                },
+                {
+                    "role": "user",
+                    "content": f"Resume:\n{resume_text}\n\nJob Description:\n{job_description}"
+                }
+            ],
+            temperature=0.3
+        )
         
-        for content in section["content"]:
-            para = doc.add_paragraph(content["text"])
-            if content.get("style"):
-                try:
-                    para.style = content["style"]
-                except:
-                    continue
-    
-    return doc
-
-def clean_json_string(json_str: str) -> str:
-    """Clean and validate JSON string from OpenAI response."""
-    # Remove any potential markdown formatting
-    if json_str.startswith("```json"):
-        json_str = json_str.split("```json")[1]
-    if json_str.startswith("```"):
-        json_str = json_str.split("```")[1]
-    if json_str.endswith("```"):
-        json_str = json_str.rsplit("```", 1)[0]
-    
-    # Strip whitespace and newlines
-    json_str = json_str.strip()
-    
-    return json_str
+        optimized_content = response.choices[0].message.content
+        return json.loads(optimized_content)
+    except Exception as e:
+        print(f"OpenAI optimization error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to optimize resume: {str(e)}")
 
 @app.post("/process-resume/")
 async def process_resume(
@@ -127,68 +95,57 @@ async def process_resume(
 ):
     try:
         print(f"Processing resume: {file.filename}")
-        print(f"Job description length: {len(job_description)}")
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         
-        # Read the uploaded document
+        # Read the original document
         content = await file.read()
-        doc = Document(BytesIO(content))
         
-        # Convert document to JSON
-        resume_json = docx_to_json(doc)
-        
-        # Process with OpenAI
-        sections_prompt = json.dumps(resume_json["sections"], indent=2)
-        response = client.chat.completions.create(
-            model="gpt-4",
-            messages=[
-                {
-                    "role": "system",
-                    "content": """You are a professional resume optimizer. Your task is to:
-                    1. Analyze the JSON structure of the resume and the job description
-                    2. Enhance each section's content to better match the job requirements
-                    3. Maintain the exact same structure and section titles
-                    4. Only modify the content within each section
-                    5. Return ONLY the optimized JSON array of sections, nothing else
-                    6. Preserve all formatting markers and section organization
-                    The response must be a valid JSON array that can be parsed."""
-                },
-                {
-                    "role": "user",
-                    "content": f"Resume Sections:\n{sections_prompt}\n\nJob Description:\n{job_description}\n\nOptimize these resume sections while maintaining exact structure and format. Return only the JSON array."
-                }
-            ],
-            temperature=0.3
+        # Store original resume in Supabase Storage
+        original_file_path = f"original_{timestamp}_{file.filename}"
+        storage_response = supabase.storage.from_("resume_templates").upload(
+            original_file_path,
+            content
         )
+        print(f"Original resume stored: {original_file_path}")
         
-        print("OpenAI response received")
+        # Store job description
+        jd_file_path = f"jd_{timestamp}.txt"
+        jd_bytes = job_description.encode('utf-8')
+        supabase.storage.from_("resume_templates").upload(
+            jd_file_path,
+            jd_bytes
+        )
+        print(f"Job description stored: {jd_file_path}")
         
-        # Parse the optimized content
-        optimized_content = response.choices[0].message.content
-        print(f"Raw OpenAI response: {optimized_content}")
+        # Process the document
+        doc = Document(BytesIO(content))
+        template_doc = DocxTemplate(BytesIO(content))
         
-        # Clean and parse the JSON response
-        cleaned_content = clean_json_string(optimized_content)
-        try:
-            optimized_sections = json.loads(cleaned_content)
-            if not isinstance(optimized_sections, list):
-                raise ValueError("Expected JSON array of sections")
-            resume_json["sections"] = optimized_sections
-        except (json.JSONDecodeError, ValueError) as e:
-            print(f"JSON parsing error: {str(e)}")
-            print(f"Cleaned content: {cleaned_content}")
-            raise HTTPException(status_code=500, detail=f"Failed to parse optimized content: {str(e)}")
+        # Extract template variables and current content
+        variables = extract_template_variables(doc)
+        current_content = "\n".join([p.text for p in doc.paragraphs])
         
-        # Convert back to docx
-        optimized_doc = json_to_docx(resume_json, doc)
+        # Optimize content using OpenAI
+        optimized_variables = optimize_resume_content(current_content, job_description)
         
-        # Save to BytesIO
-        doc_io = BytesIO()
-        optimized_doc.save(doc_io)
-        doc_io.seek(0)
+        # Render template with optimized content
+        template_doc.render(optimized_variables)
         
-        print("Document processed successfully")
+        # Save optimized document
+        output = BytesIO()
+        template_doc.save(output)
+        output.seek(0)
         
-        # Return the document with appropriate headers
+        # Store optimized resume
+        optimized_file_path = f"optimized_{timestamp}_{file.filename}"
+        supabase.storage.from_("resume_templates").upload(
+            optimized_file_path,
+            output.getvalue()
+        )
+        print(f"Optimized resume stored: {optimized_file_path}")
+        
+        # Return the optimized document
+        output.seek(0)
         headers = {
             "Content-Disposition": f"attachment; filename=optimized_{file.filename}",
             "Access-Control-Expose-Headers": "Content-Disposition",
@@ -196,7 +153,7 @@ async def process_resume(
         }
         
         return StreamingResponse(
-            doc_io,
+            output,
             media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             headers=headers
         )
