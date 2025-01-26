@@ -14,7 +14,49 @@ import base64
 from supabase import create_client, Client
 import re
 
-# ... keep existing code (environment variables and app initialization)
+# Load environment variables
+load_dotenv()
+
+# Initialize FastAPI app
+app = FastAPI(title="Resume Optimizer API")
+
+# Configure CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["*"],
+    max_age=3600,
+)
+
+# Initialize OpenAI client
+api_key = os.getenv("OPENAI_API_KEY")
+if not api_key:
+    raise ValueError("OPENAI_API_KEY environment variable is not set")
+
+client = OpenAI(
+    api_key=api_key,
+    base_url="https://api.openai.com/v1",
+    timeout=60.0,
+    max_retries=2
+)
+
+# Initialize Supabase client
+supabase_url = os.getenv("SUPABASE_URL")
+supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+
+if not supabase_url:
+    raise ValueError("SUPABASE_URL environment variable is not set")
+if not supabase_key:
+    raise ValueError("SUPABASE_SERVICE_ROLE_KEY environment variable is not set")
+
+try:
+    print(f"Initializing Supabase client with URL: {supabase_url}")
+    supabase = create_client(supabase_url, supabase_key)
+except Exception as e:
+    print(f"Error initializing Supabase client: {str(e)}")
+    raise ValueError(f"Failed to initialize Supabase client: {str(e)}")
 
 def sanitize_filename(filename: str) -> str:
     """Sanitize filename to be safe for storage."""
@@ -86,15 +128,105 @@ def optimize_resume_content(resume_text: str, job_description: str) -> Dict[str,
             detail=f"Failed to optimize resume: {str(e)}"
         )
 
-# ... keep existing code (process_resume endpoint and other functions)
+@app.post("/process-resume/")
+async def process_resume(
+    file: UploadFile = File(...),
+    job_description: str = Form(...)
+):
+    try:
+        print(f"Processing resume: {file.filename}")
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        
+        # Sanitize the filename
+        sanitized_filename = sanitize_filename(file.filename)
+        print(f"Sanitized filename: {sanitized_filename}")
+        
+        # Read the original document
+        content = await file.read()
+        
+        # Store original resume in Supabase Storage
+        original_file_path = f"original_{timestamp}_{sanitized_filename}"
+        try:
+            storage_response = supabase.storage.from_("resume_templates").upload(
+                original_file_path,
+                content
+            )
+            print(f"Original resume stored: {original_file_path}")
+        except Exception as e:
+            print(f"Storage error: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Failed to store original resume: {str(e)}")
+        
+        # Store job description
+        jd_file_path = f"jd_{timestamp}.txt"
+        jd_bytes = job_description.encode('utf-8')
+        try:
+            supabase.storage.from_("resume_templates").upload(
+                jd_file_path,
+                jd_bytes
+            )
+            print(f"Job description stored: {jd_file_path}")
+        except Exception as e:
+            print(f"Failed to store job description: {str(e)}")
+            # Continue processing even if job description storage fails
+        
+        # Process the document
+        doc = Document(BytesIO(content))
+        template_doc = DocxTemplate(BytesIO(content))
+        
+        # Extract template variables and current content
+        variables = extract_template_variables(doc)
+        current_content = "\n".join([p.text for p in doc.paragraphs])
+        
+        # Optimize content using OpenAI
+        optimized_variables = optimize_resume_content(current_content, job_description)
+        
+        # Render template with optimized content
+        template_doc.render(optimized_variables)
+        
+        # Save optimized document
+        output = BytesIO()
+        template_doc.save(output)
+        output.seek(0)
+        
+        # Store optimized resume
+        optimized_file_path = f"optimized_{timestamp}_{sanitized_filename}"
+        try:
+            supabase.storage.from_("resume_templates").upload(
+                optimized_file_path,
+                output.getvalue()
+            )
+            print(f"Optimized resume stored: {optimized_file_path}")
+        except Exception as e:
+            print(f"Failed to store optimized resume: {str(e)}")
+            # Continue to return the optimized document even if storage fails
+        
+        # Return the optimized document
+        output.seek(0)
+        headers = {
+            "Content-Disposition": f"attachment; filename=optimized_{sanitized_filename}",
+            "Access-Control-Expose-Headers": "Content-Disposition",
+            "Access-Control-Allow-Origin": "*"
+        }
+        
+        return StreamingResponse(
+            output,
+            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            headers=headers
+        )
+        
+    except Exception as e:
+        print(f"Error processing resume: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
-if __name__ == "__main__":
-    import uvicorn
-    port = int(os.getenv("PORT", 8000))
-    uvicorn.run(
-        "main:app",
-        host="0.0.0.0",
-        port=port,
-        workers=1,
-        log_level="info"
-    )
+@app.options("/process-resume/")
+async def options_process_resume():
+    return {
+        "allow": "POST,OPTIONS",
+        "content-type": "multipart/form-data",
+        "access-control-allow-headers": "Content-Type,Authorization",
+        "access-control-allow-origin": "*"
+    }
+
+@app.get("/health")
+async def health_check():
+    return {"status": "healthy"}
