@@ -14,14 +14,14 @@ load_dotenv()
 # Initialize FastAPI app
 app = FastAPI(title="Resume Optimizer API")
 
-# Configure CORS with more specific settings
+# Configure CORS - Allow all origins for development
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, you should list specific origins
+    allow_origins=["*"],
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
-    max_age=3600,  # Cache preflight requests for 1 hour
+    max_age=3600,
 )
 
 # Initialize OpenAI client
@@ -37,7 +37,7 @@ async def process_resume(
     job_description: str = Form(...)
 ):
     try:
-        # Read the uploaded document with timeout handling
+        # Read the uploaded document
         content = await file.read()
         doc = Document(BytesIO(content))
         
@@ -69,8 +69,7 @@ async def process_resume(
                     "content": f"Original Resume:\n{original_text}\n\nJob Description:\n{job_description}\n\nOptimize this resume for the job while maintaining exact structure and format."
                 }
             ],
-            temperature=0.3,
-            timeout=60  # Set a 60-second timeout for the OpenAI request
+            temperature=0.3
         )
         
         optimized_content = response.choices[0].message.content
@@ -89,13 +88,16 @@ async def process_resume(
         doc_io.seek(0)
         
         # Return the document with appropriate headers
+        headers = {
+            "Content-Disposition": f"attachment; filename=optimized_{file.filename}",
+            "Access-Control-Expose-Headers": "Content-Disposition",
+            "Access-Control-Allow-Origin": "*"
+        }
+        
         return StreamingResponse(
             doc_io,
             media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            headers={
-                "Content-Disposition": f"attachment; filename=optimized_{file.filename}",
-                "Access-Control-Expose-Headers": "Content-Disposition"
-            }
+            headers=headers
         )
         
     except Exception as e:
@@ -104,8 +106,12 @@ async def process_resume(
 
 @app.options("/process-resume/")
 async def options_process_resume():
-    # Handle OPTIONS requests explicitly
-    return {"message": "OK"}
+    return {
+        "allow": "POST,OPTIONS",
+        "content-type": "multipart/form-data",
+        "access-control-allow-headers": "Content-Type,Authorization",
+        "access-control-allow-origin": "*"
+    }
 
 @app.get("/health")
 async def health_check():
@@ -115,11 +121,10 @@ if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", 8000))
     uvicorn.run(
-        app,
+        "main:app",
         host="0.0.0.0",
         port=port,
-        timeout_keep_alive=65,
-        timeout_notify=60,
-        limit_concurrency=10,
-        backlog=128
+        workers=4,
+        timeout_keep_alive=75,
+        log_level="info"
     )
