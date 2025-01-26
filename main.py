@@ -2,10 +2,12 @@ from fastapi import FastAPI, File, UploadFile, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from docx import Document
+from docxtpl import DocxTemplate
 from openai import OpenAI
+import json
 import os
 from io import BytesIO
-from typing import Optional
+from typing import Dict, Any
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -29,13 +31,79 @@ api_key = os.getenv("OPENAI_API_KEY")
 if not api_key:
     raise ValueError("OPENAI_API_KEY environment variable is not set")
 
-# Initialize OpenAI client with explicit configuration
 client = OpenAI(
     api_key=api_key,
     base_url="https://api.openai.com/v1",
     timeout=60.0,
     max_retries=2
 )
+
+def docx_to_json(doc: Document) -> Dict[str, Any]:
+    """Convert a docx document to a structured JSON format."""
+    json_data = {
+        "sections": [],
+        "styles": {}
+    }
+    
+    current_section = {"title": "", "content": []}
+    
+    for paragraph in doc.paragraphs:
+        # Store style information
+        style = paragraph.style.name
+        if style not in json_data["styles"]:
+            json_data["styles"][style] = {
+                "name": style,
+                "font": paragraph.style.font.name if paragraph.style.font else None,
+                "size": paragraph.style.font.size if paragraph.style.font else None,
+                "bold": paragraph.style.font.bold if paragraph.style.font else None,
+                "italic": paragraph.style.font.italic if paragraph.style.font else None
+            }
+        
+        # Detect section headers based on style or formatting
+        if paragraph.style.name.lower().startswith(('heading', 'title')):
+            if current_section["title"]:  # Save previous section
+                json_data["sections"].append(current_section)
+            current_section = {"title": paragraph.text, "content": [], "style": style}
+        else:
+            if paragraph.text.strip():
+                current_section["content"].append({
+                    "text": paragraph.text,
+                    "style": style
+                })
+    
+    # Add the last section
+    if current_section["title"] or current_section["content"]:
+        json_data["sections"].append(current_section)
+    
+    return json_data
+
+def json_to_docx(json_data: Dict[str, Any], template_doc: Document) -> Document:
+    """Convert JSON back to a docx document while preserving formatting."""
+    doc = Document()
+    
+    # Copy styles from template
+    for style in template_doc.styles:
+        if style.name not in doc.styles:
+            try:
+                doc.styles.add_style(style.name, style.type)
+            except:
+                continue
+    
+    # Recreate document from JSON
+    for section in json_data["sections"]:
+        if section["title"]:
+            title_para = doc.add_paragraph(section["title"])
+            title_para.style = section.get("style", "Heading 1")
+        
+        for content in section["content"]:
+            para = doc.add_paragraph(content["text"])
+            if content.get("style"):
+                try:
+                    para.style = content["style"]
+                except:
+                    continue
+    
+    return doc
 
 @app.post("/process-resume/")
 async def process_resume(
@@ -47,50 +115,43 @@ async def process_resume(
         content = await file.read()
         doc = Document(BytesIO(content))
         
-        # Extract text while preserving structure
-        paragraphs = []
-        for para in doc.paragraphs:
-            if para.text.strip():
-                paragraphs.append(para.text)
-        
-        original_text = "\n".join(paragraphs)
+        # Convert document to JSON
+        resume_json = docx_to_json(doc)
         
         # Process with OpenAI
+        sections_prompt = json.dumps(resume_json["sections"])
         response = client.chat.completions.create(
             model="gpt-4",
             messages=[
                 {
                     "role": "system",
                     "content": """You are a professional resume optimizer. Your task is to:
-                    1. Analyze both the resume and job description
-                    2. Enhance the resume content to better match the job requirements
-                    3. Maintain the exact same structure and sections as the original resume
-                    4. Keep all formatting markers and section titles intact
-                    5. Only modify the content within each section to better align with the job
-                    6. Ensure the output can be directly used to create a new document
-                    Return only the optimized content, structured exactly like the input."""
+                    1. Analyze the JSON structure of the resume and the job description
+                    2. Enhance each section's content to better match the job requirements
+                    3. Maintain the exact same structure and section titles
+                    4. Only modify the content within each section
+                    5. Return the optimized content in the exact same JSON format
+                    6. Preserve all formatting markers and section organization
+                    Return only the optimized JSON structure."""
                 },
                 {
                     "role": "user",
-                    "content": f"Original Resume:\n{original_text}\n\nJob Description:\n{job_description}\n\nOptimize this resume for the job while maintaining exact structure and format."
+                    "content": f"Resume Sections:\n{sections_prompt}\n\nJob Description:\n{job_description}\n\nOptimize these resume sections while maintaining exact structure and format."
                 }
             ],
             temperature=0.3
         )
         
-        optimized_content = response.choices[0].message.content
+        # Parse the optimized content
+        optimized_sections = json.loads(response.choices[0].message.content)
+        resume_json["sections"] = optimized_sections
         
-        # Create new document with optimized content
-        new_doc = Document()
-        
-        # Split optimized content into paragraphs and preserve formatting
-        for paragraph in optimized_content.split('\n'):
-            if paragraph.strip():
-                new_doc.add_paragraph(paragraph)
+        # Convert back to docx
+        optimized_doc = json_to_docx(resume_json, doc)
         
         # Save to BytesIO
         doc_io = BytesIO()
-        new_doc.save(doc_io)
+        optimized_doc.save(doc_io)
         doc_io.seek(0)
         
         # Return the document with appropriate headers
