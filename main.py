@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 from datetime import datetime
 import base64
 from supabase import create_client, Client
+import re
 
 # Load environment variables
 load_dotenv()
@@ -41,7 +42,7 @@ client = OpenAI(
     max_retries=2
 )
 
-# Initialize Supabase client with better error handling
+# Initialize Supabase client
 supabase_url = os.getenv("SUPABASE_URL")
 supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 
@@ -57,12 +58,21 @@ except Exception as e:
     print(f"Error initializing Supabase client: {str(e)}")
     raise ValueError(f"Failed to initialize Supabase client: {str(e)}")
 
+def sanitize_filename(filename: str) -> str:
+    """Sanitize filename to be safe for storage."""
+    # Remove square brackets and their contents
+    filename = re.sub(r'\[.*?\]', '', filename)
+    # Replace any non-alphanumeric characters (except dots and hyphens) with underscores
+    filename = re.sub(r'[^\w\-\.]', '_', filename)
+    # Remove any leading/trailing spaces or underscores
+    filename = filename.strip('_').strip()
+    return filename
+
 def extract_template_variables(doc: Document) -> Dict[str, str]:
     """Extract template variables from the document."""
     variables = {}
     for paragraph in doc.paragraphs:
         text = paragraph.text
-        # Look for potential template variables (text between {{ and }})
         if "{{" in text and "}}" in text:
             var_start = text.find("{{")
             var_end = text.find("}}")
@@ -105,25 +115,37 @@ async def process_resume(
         print(f"Processing resume: {file.filename}")
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         
+        # Sanitize the filename
+        sanitized_filename = sanitize_filename(file.filename)
+        print(f"Sanitized filename: {sanitized_filename}")
+        
         # Read the original document
         content = await file.read()
         
         # Store original resume in Supabase Storage
-        original_file_path = f"original_{timestamp}_{file.filename}"
-        storage_response = supabase.storage.from_("resume_templates").upload(
-            original_file_path,
-            content
-        )
-        print(f"Original resume stored: {original_file_path}")
+        original_file_path = f"original_{timestamp}_{sanitized_filename}"
+        try:
+            storage_response = supabase.storage.from_("resume_templates").upload(
+                original_file_path,
+                content
+            )
+            print(f"Original resume stored: {original_file_path}")
+        except Exception as e:
+            print(f"Storage error: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Failed to store original resume: {str(e)}")
         
         # Store job description
         jd_file_path = f"jd_{timestamp}.txt"
         jd_bytes = job_description.encode('utf-8')
-        supabase.storage.from_("resume_templates").upload(
-            jd_file_path,
-            jd_bytes
-        )
-        print(f"Job description stored: {jd_file_path}")
+        try:
+            supabase.storage.from_("resume_templates").upload(
+                jd_file_path,
+                jd_bytes
+            )
+            print(f"Job description stored: {jd_file_path}")
+        except Exception as e:
+            print(f"Failed to store job description: {str(e)}")
+            # Continue processing even if job description storage fails
         
         # Process the document
         doc = Document(BytesIO(content))
@@ -145,17 +167,21 @@ async def process_resume(
         output.seek(0)
         
         # Store optimized resume
-        optimized_file_path = f"optimized_{timestamp}_{file.filename}"
-        supabase.storage.from_("resume_templates").upload(
-            optimized_file_path,
-            output.getvalue()
-        )
-        print(f"Optimized resume stored: {optimized_file_path}")
+        optimized_file_path = f"optimized_{timestamp}_{sanitized_filename}"
+        try:
+            supabase.storage.from_("resume_templates").upload(
+                optimized_file_path,
+                output.getvalue()
+            )
+            print(f"Optimized resume stored: {optimized_file_path}")
+        except Exception as e:
+            print(f"Failed to store optimized resume: {str(e)}")
+            # Continue to return the optimized document even if storage fails
         
         # Return the optimized document
         output.seek(0)
         headers = {
-            "Content-Disposition": f"attachment; filename=optimized_{file.filename}",
+            "Content-Disposition": f"attachment; filename=optimized_{sanitized_filename}",
             "Access-Control-Expose-Headers": "Content-Disposition",
             "Access-Control-Allow-Origin": "*"
         }
