@@ -52,9 +52,7 @@ if not supabase_key:
 
 try:
     print(f"Initializing Supabase client with URL: {supabase_url}")
-    supabase: Client = create_client(supabase_url, supabase_key)
-    # Test the connection
-    supabase.auth.get_user("dummy-token")
+    supabase = create_client(supabase_url, supabase_key)
 except Exception as e:
     print(f"Error initializing Supabase client: {str(e)}")
     raise ValueError(f"Failed to initialize Supabase client: {str(e)}")
