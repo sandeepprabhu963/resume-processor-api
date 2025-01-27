@@ -98,26 +98,43 @@ def optimize_resume_content(template_vars: Dict[str, str], job_description: str)
         4. Focus on relevant skills and natural keyword integration"""
 
         try:
+            # Validate input data
+            if not template_vars or not job_description:
+                raise ValueError("Missing required input data")
+
+            # Make API call with validated data
             response = client.chat.completions.create(
                 model="gpt-4o",
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": f"Original Resume:\n{json.dumps(template_vars, ensure_ascii=False)}\n\nJob Description:\n{job_description}"}
                 ],
-                temperature=0.7
+                temperature=0.7,
+                max_tokens=2000  # Add reasonable token limit
             )
             
-            if not response.choices or not response.choices[0].message:
-                raise ValueError("No response received from OpenAI API")
-                
-            response_content = response.choices[0].message.content
-            print("OpenAI response:", response_content)
+            # Validate API response
+            if not response or not response.choices:
+                raise ValueError("Invalid response structure from OpenAI API")
             
+            if not response.choices[0] or not response.choices[0].message:
+                raise ValueError("No message content in OpenAI response")
+            
+            response_content = response.choices[0].message.content
+            if not response_content:
+                raise ValueError("Empty response content from OpenAI API")
+            
+            print("Raw OpenAI response:", response_content)
+            
+            # Parse and validate JSON response
             try:
                 optimized_content = json.loads(response_content)
+                if not isinstance(optimized_content, dict):
+                    raise ValueError("OpenAI response is not a valid JSON object")
+                
                 print("Successfully parsed optimized content")
                 
-                # Validate and maintain structure
+                # Validate structure matches original
                 for key in template_vars.keys():
                     if key not in optimized_content:
                         print(f"Missing key in optimized content: {key}")
@@ -128,7 +145,7 @@ def optimize_resume_content(template_vars: Dict[str, str], job_description: str)
                         if len(orig_lines) != len(opt_lines):
                             print(f"Line count mismatch for {key}")
                             optimized_content[key] = template_vars[key]
-                            
+                
                 return optimized_content
                 
             except json.JSONDecodeError as e:
