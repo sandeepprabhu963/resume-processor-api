@@ -12,7 +12,6 @@ from dotenv import load_dotenv
 from datetime import datetime
 import re
 from supabase import create_client
-import spacy
 import nltk
 from nltk.tokenize import word_tokenize
 from nltk.corpus import stopwords
@@ -20,9 +19,6 @@ from nltk.corpus import stopwords
 # Download required NLTK data
 nltk.download('punkt')
 nltk.download('stopwords')
-
-# Load spaCy model
-nlp = spacy.load('en_core_web_sm')
 
 load_dotenv()
 
@@ -49,6 +45,22 @@ if not supabase_url or not supabase_key:
     raise ValueError("Supabase environment variables are not properly set")
 supabase = create_client(supabase_url, supabase_key)
 
+def analyze_text(text: str) -> Dict[str, Any]:
+    """Analyze text using NLTK for keyword extraction."""
+    # Tokenize and remove stopwords
+    tokens = word_tokenize(text.lower())
+    stop_words = set(stopwords.words('english'))
+    tokens = [token for token in tokens if token not in stop_words]
+    
+    # Extract technical skills
+    skills_pattern = r'\b(?:Python|Java|SQL|AWS|Azure|GCP|Docker|Kubernetes|React|Angular|Vue|Node\.js|JavaScript|TypeScript|C\+\+|Ruby|PHP|HTML|CSS|REST|API|ML|AI|DevOps|CI/CD|Git|Agile|Scrum)\b'
+    technical_skills = list(set(re.findall(skills_pattern, text, re.IGNORECASE)))
+    
+    return {
+        'keywords': tokens,
+        'technical_skills': technical_skills
+    }
+
 def extract_template_variables(doc: Document) -> Dict[str, str]:
     """Extract content from the document while preserving structure."""
     variables = {}
@@ -60,7 +72,6 @@ def extract_template_variables(doc: Document) -> Dict[str, str]:
         if not text:
             continue
             
-        # Detect section headers (all caps or ending with colon)
         if text.isupper() or text.endswith(':'):
             if current_section and section_content:
                 variables[current_section] = '\n'.join(section_content)
@@ -68,7 +79,6 @@ def extract_template_variables(doc: Document) -> Dict[str, str]:
             current_section = text.lower().replace(':', '').strip()
         else:
             if current_section:
-                # Preserve bullet points and formatting
                 if paragraph.style.name.startswith('List'):
                     text = f"• {text}"
                 section_content.append(text)
@@ -78,32 +88,11 @@ def extract_template_variables(doc: Document) -> Dict[str, str]:
         
     return variables
 
-def analyze_job_description(job_description: str) -> Dict[str, Any]:
-    """Analyze job description using NLP to extract key requirements."""
-    doc = nlp(job_description)
-    
-    # Extract key skills and requirements
-    skills = set()
-    requirements = []
-    
-    for ent in doc.ents:
-        if ent.label_ in ['ORG', 'PRODUCT', 'GPE']:
-            skills.add(ent.text.lower())
-    
-    for token in doc:
-        if token.pos_ in ['NOUN', 'PROPN'] and len(token.text) > 2:
-            skills.add(token.text.lower())
-    
-    return {
-        'skills': list(skills),
-        'requirements': requirements
-    }
-
 def optimize_resume_content(template_vars: Dict[str, str], job_description: str) -> Dict[str, str]:
     """Optimize resume content while preserving format."""
     try:
         # Analyze job description
-        job_analysis = analyze_job_description(job_description)
+        job_analysis = analyze_text(job_description)
         
         system_prompt = """You are an expert ATS resume optimizer. Your task is to optimize the resume content while maintaining the exact format:
         1. Return ONLY a valid JSON object with the same keys as input
@@ -120,10 +109,10 @@ def optimize_resume_content(template_vars: Dict[str, str], job_description: str)
         Return only the JSON object, nothing else."""
 
         response = client.chat.completions.create(
-            model="gpt-4o",
+            model="gpt-4",
             messages=[
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"Original Resume:\n{json.dumps(template_vars)}\n\nJob Description:\n{job_description}\n\nKey Skills Required:\n{', '.join(job_analysis['skills'])}"}
+                {"role": "user", "content": f"Original Resume:\n{json.dumps(template_vars)}\n\nJob Description:\n{job_description}\n\nKey Skills Required:\n{', '.join(job_analysis['technical_skills'])}"}
             ],
             temperature=0.7
         )
@@ -132,7 +121,6 @@ def optimize_resume_content(template_vars: Dict[str, str], job_description: str)
         if not response_content:
             raise ValueError("Empty response from OpenAI")
             
-        print(f"Raw OpenAI response: {response_content}")
         optimized_content = json.loads(response_content)
         
         # Verify structure preservation
