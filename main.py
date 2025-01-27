@@ -27,24 +27,30 @@ app.add_middleware(
     expose_headers=["Content-Disposition"],
 )
 
-# Initialize Gemini API with safety settings
+# Initialize API clients and configurations
 api_key = os.getenv("GEMINI_API_KEY")
 if not api_key:
     raise ValueError("GEMINI_API_KEY environment variable is not set")
 genai.configure(api_key=api_key)
 
-# Initialize Supabase client
 supabase_url = os.getenv("SUPABASE_URL")
 supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 if not supabase_url or not supabase_key:
     raise ValueError("Supabase environment variables are not properly set")
 supabase = create_client(supabase_url, supabase_key)
 
-def docx_to_json(doc: Document) -> Dict[str, str]:
-    """Convert DOCX document to JSON format with improved section detection."""
+def docx_to_json(doc: Document) -> Dict[str, Any]:
+    """Convert DOCX document to JSON format with improved structure handling."""
     try:
-        print("Converting DOCX to JSON...")
-        json_data = {}
+        print("Starting DOCX to JSON conversion...")
+        json_data = {
+            "sections": {},
+            "metadata": {
+                "created_at": datetime.now().isoformat(),
+                "format_version": "1.0"
+            }
+        }
+        
         current_section = None
         section_content = []
         
@@ -52,34 +58,114 @@ def docx_to_json(doc: Document) -> Dict[str, str]:
             text = paragraph.text.strip()
             if not text:
                 continue
-                
+            
             # Enhanced section header detection
-            if (text.isupper() or text.endswith(':') or 
-                any(header in text.lower() for header in ['summary', 'experience', 'education', 'skills'])):
+            if (text.isupper() or 
+                text.endswith(':') or 
+                any(header in text.lower() for header in 
+                    ['summary', 'experience', 'education', 'skills', 'contact', 'objective'])):
+                
                 if current_section and section_content:
-                    json_data[current_section] = '\n'.join(section_content)
+                    json_data["sections"][current_section] = {
+                        "content": section_content,
+                        "style": "regular"
+                    }
                     section_content = []
+                
                 current_section = text.lower().replace(':', '').strip()
+                
             else:
                 if current_section:
-                    # Preserve bullet points and formatting
-                    if text.startswith('•') or text.startswith('-'):
-                        section_content.append(f"• {text.lstrip('•').lstrip('-').strip()}")
-                    else:
-                        section_content.append(text)
+                    # Preserve formatting and structure
+                    para_data = {
+                        "text": text,
+                        "style": "bullet" if text.startswith('•') or text.startswith('-') else "regular",
+                        "formatting": {
+                            "bold": any(run.bold for run in paragraph.runs),
+                            "italic": any(run.italic for run in paragraph.runs)
+                        }
+                    }
+                    section_content.append(para_data)
                 elif not current_section and text:
                     current_section = "header"
-                    section_content.append(text)
+                    section_content.append({
+                        "text": text,
+                        "style": "regular",
+                        "formatting": {"bold": True}
+                    })
         
         # Add the last section
         if current_section and section_content:
-            json_data[current_section] = '\n'.join(section_content)
-            
+            json_data["sections"][current_section] = {
+                "content": section_content,
+                "style": "regular"
+            }
+        
         print("Successfully converted DOCX to JSON")
         return json_data
+        
     except Exception as e:
         print(f"Error in docx_to_json: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to convert resume to JSON: {str(e)}")
+
+def json_to_docx(template_doc: DocxTemplate, json_data: Dict[str, Any]) -> BytesIO:
+    """Convert JSON back to DOCX format with improved formatting preservation."""
+    try:
+        print("Starting JSON to DOCX conversion...")
+        
+        # Create context for template
+        context = {}
+        
+        for section_name, section_data in json_data.get("sections", {}).items():
+            # Convert section name to valid template variable
+            template_var = re.sub(r'[^\w]', '_', section_name.lower())
+            
+            formatted_content = []
+            for item in section_data.get("content", []):
+                text = item.get("text", "").strip()
+                if not text:
+                    continue
+                
+                # Apply formatting
+                if item.get("style") == "bullet":
+                    if not text.startswith('•'):
+                        text = f"• {text}"
+                
+                # Handle special formatting
+                if item.get("formatting", {}).get("bold"):
+                    text = f"**{text}**"
+                if item.get("formatting", {}).get("italic"):
+                    text = f"*{text}*"
+                
+                formatted_content.append(text)
+            
+            # Join with proper line breaks
+            context[template_var] = '\n'.join(formatted_content)
+            
+            # Also provide bullet points separately
+            bullet_points = [
+                item.get("text") for item in section_data.get("content", [])
+                if item.get("style") == "bullet"
+            ]
+            if bullet_points:
+                context[f"{template_var}_bullets"] = bullet_points
+        
+        print("Template context prepared:", context)
+        
+        # Render template
+        template_doc.render(context)
+        
+        # Save to BytesIO
+        output = BytesIO()
+        template_doc.save(output)
+        output.seek(0)
+        
+        print("Successfully converted JSON to DOCX")
+        return output
+        
+    except Exception as e:
+        print(f"Error in json_to_docx: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to convert to DOCX: {str(e)}")
 
 def optimize_with_gemini(json_data: Dict[str, str], job_description: str) -> Dict[str, str]:
     """Optimize resume content using Gemini AI with enhanced error handling."""
@@ -152,56 +238,6 @@ def optimize_with_gemini(json_data: Dict[str, str], job_description: str) -> Dic
     except Exception as e:
         print(f"Gemini optimization error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to optimize resume content: {str(e)}")
-
-def json_to_docx(template_doc: DocxTemplate, json_data: Dict[str, str]) -> BytesIO:
-    """Convert JSON back to DOCX format with improved template handling."""
-    try:
-        print("Converting JSON back to DOCX...")
-        
-        # Create a context dictionary for the template
-        context = {}
-        
-        # Process each section in the JSON data
-        for section_name, content in json_data.items():
-            # Convert section name to a valid template variable
-            template_var = re.sub(r'[^\w]', '_', section_name.lower())
-            
-            # Split content into lines for processing
-            lines = content.split('\n')
-            formatted_lines = []
-            
-            for line in lines:
-                line = line.strip()
-                if line:
-                    # Handle bullet points
-                    if line.startswith('•') or line.startswith('-'):
-                        formatted_lines.append(f"• {line.lstrip('•').lstrip('-').strip()}")
-                    else:
-                        formatted_lines.append(line)
-            
-            # Join lines with proper line breaks for docxtpl
-            context[template_var] = '\n'.join(formatted_lines)
-            
-            # Also provide a bullet-point version for flexibility in templates
-            bullet_points = [line for line in formatted_lines if line.startswith('•')]
-            if bullet_points:
-                context[f"{template_var}_bullets"] = bullet_points
-        
-        print("Template context prepared:", context)
-        
-        # Render the template with our context
-        template_doc.render(context)
-        
-        # Save to BytesIO
-        output = BytesIO()
-        template_doc.save(output)
-        output.seek(0)
-        
-        print("Successfully converted JSON to DOCX")
-        return output
-    except Exception as e:
-        print(f"Error in json_to_docx: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to convert to DOCX: {str(e)}")
 
 @app.post("/process-resume/")
 async def process_resume(
