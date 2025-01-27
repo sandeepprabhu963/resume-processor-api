@@ -78,6 +78,9 @@ def extract_template_variables(doc: Document) -> Dict[str, str]:
 
 def optimize_resume_content(template_vars: Dict[str, str], job_description: str) -> Dict[str, str]:
     try:
+        # Convert template_vars to a properly formatted JSON string
+        template_vars_json = json.dumps(template_vars, ensure_ascii=False)
+        
         system_prompt = """You are an expert ATS resume optimizer. Your task is to optimize the resume content while maintaining the exact format:
         1. Return ONLY a valid JSON object with the same keys as input
         2. For each section:
@@ -91,16 +94,31 @@ def optimize_resume_content(template_vars: Dict[str, str], job_description: str)
         3. DO NOT change structure or formatting
         4. Focus on relevant skills and natural keyword integration"""
 
+        print("Sending request to OpenAI with template vars:", template_vars_json)
+        
         response = client.chat.completions.create(
             model="gpt-4",
             messages=[
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"Original Resume:\n{json.dumps(template_vars)}\n\nJob Description:\n{job_description}"}
+                {"role": "user", "content": f"Original Resume:\n{template_vars_json}\n\nJob Description:\n{job_description}"}
             ],
             temperature=0.7
         )
         
-        optimized_content = json.loads(response.choices[0].message.content)
+        # Get the response content
+        response_content = response.choices[0].message.content
+        print("Received response from OpenAI:", response_content)
+        
+        # Parse the response content as JSON
+        try:
+            optimized_content = json.loads(response_content)
+        except json.JSONDecodeError as e:
+            print(f"JSON parsing error: {str(e)}")
+            print(f"Response content that failed to parse: {response_content}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to parse optimized content: {str(e)}"
+            )
         
         # Validate and maintain structure
         for key in template_vars.keys():
