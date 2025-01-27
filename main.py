@@ -15,15 +15,15 @@ from supabase import create_client
 
 load_dotenv()
 
-app = FastAPI(title="Resume Optimizer API")
+app = FastAPI()
 
+# Configure CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_credentials=True,
-    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_methods=["*"],
     allow_headers=["*"],
-    max_age=3600,
 )
 
 # Initialize OpenAI client
@@ -63,25 +63,6 @@ def extract_template_variables(doc: Document) -> Dict[str, str]:
         
     return variables
 
-def clean_json_response(response_text: str) -> str:
-    try:
-        cleaned = response_text.strip()
-        start_idx = cleaned.find('{')
-        end_idx = cleaned.rfind('}')
-        
-        if start_idx == -1 or end_idx == -1:
-            print(f"Invalid JSON structure. Raw response: {response_text}")
-            raise ValueError("No valid JSON object found in response")
-            
-        cleaned = cleaned[start_idx:end_idx + 1]
-        parsed = json.loads(cleaned)
-        return json.dumps(parsed)
-        
-    except Exception as e:
-        print(f"JSON cleaning error. Raw response: {response_text}")
-        print(f"Error details: {str(e)}")
-        raise ValueError(f"Failed to clean JSON response: {str(e)}")
-
 def optimize_resume_content(template_vars: Dict[str, str], job_description: str) -> Dict[str, str]:
     try:
         system_prompt = """You are an expert ATS resume optimizer. Your task is to optimize the resume content while maintaining the exact format:
@@ -95,8 +76,7 @@ def optimize_resume_content(template_vars: Dict[str, str], job_description: str)
            - Keep same number of lines
            - Keep dates and company names
         3. DO NOT change structure or formatting
-        4. Focus on relevant skills and natural keyword integration
-        Return only the JSON object, nothing else."""
+        4. Focus on relevant skills and natural keyword integration"""
 
         response = client.chat.completions.create(
             model="gpt-4",
@@ -107,22 +87,16 @@ def optimize_resume_content(template_vars: Dict[str, str], job_description: str)
             temperature=0.7
         )
         
-        response_content = response.choices[0].message.content
-        if not response_content:
-            raise ValueError("Empty response from OpenAI")
-            
-        cleaned_json = clean_json_response(response_content)
-        optimized_content = json.loads(cleaned_json)
+        optimized_content = json.loads(response.choices[0].message.content)
         
+        # Validate and maintain structure
         for key in template_vars.keys():
             if key not in optimized_content:
-                print(f"Missing key in optimization: {key}")
                 optimized_content[key] = template_vars[key]
             else:
                 orig_lines = template_vars[key].split('\n')
                 opt_lines = optimized_content[key].split('\n')
                 if len(orig_lines) != len(opt_lines):
-                    print(f"Line count mismatch in section {key}")
                     optimized_content[key] = template_vars[key]
                     
         return optimized_content
@@ -188,23 +162,13 @@ async def process_resume(
             media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             headers={
                 "Content-Disposition": f"attachment; filename=optimized_{filename}",
-                "Access-Control-Expose-Headers": "Content-Disposition",
-                "Access-Control-Allow-Origin": "*"
+                "Access-Control-Expose-Headers": "Content-Disposition"
             }
         )
         
     except Exception as e:
         print(f"Processing error: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
-
-@app.options("/process-resume/")
-async def options_process_resume():
-    return {
-        "allow": "POST,OPTIONS",
-        "content-type": "multipart/form-data",
-        "access-control-allow-headers": "Content-Type,Authorization",
-        "access-control-allow-origin": "*"
-    }
 
 @app.get("/health")
 async def health_check():
