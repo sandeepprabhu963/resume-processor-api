@@ -1,6 +1,6 @@
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 from docx import Document
 from docxtpl import DocxTemplate
 from openai import OpenAI
@@ -46,28 +46,35 @@ class ResumeResponse(BaseModel):
     content: bytes
 
 def extract_template_variables(doc: Document) -> Dict[str, str]:
-    variables = {}
-    current_section = None
-    section_content = []
-    
-    for paragraph in doc.paragraphs:
-        text = paragraph.text.strip()
-        if not text:
-            continue
-            
-        if text.isupper() or text.endswith(':'):
-            if current_section and section_content:
-                variables[current_section] = '\n'.join(section_content)
-                section_content = []
-            current_section = text.lower().replace(':', '').strip()
-        else:
-            if current_section:
-                section_content.append(text)
-            
-    if current_section and section_content:
-        variables[current_section] = '\n'.join(section_content)
+    try:
+        variables = {}
+        current_section = None
+        section_content = []
         
-    return variables
+        for paragraph in doc.paragraphs:
+            text = paragraph.text.strip()
+            if not text:
+                continue
+                
+            if text.isupper() or text.endswith(':'):
+                if current_section and section_content:
+                    variables[current_section] = '\n'.join(section_content)
+                    section_content = []
+                current_section = text.lower().replace(':', '').strip()
+            else:
+                if current_section:
+                    section_content.append(text)
+                
+        if current_section and section_content:
+            variables[current_section] = '\n'.join(section_content)
+            
+        return variables
+    except Exception as e:
+        print(f"Error extracting template variables: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to process resume template. Please ensure the document is properly formatted."
+        )
 
 def optimize_resume_content(template_vars: Dict[str, str], job_description: str) -> Dict[str, str]:
     try:
@@ -109,7 +116,10 @@ def optimize_resume_content(template_vars: Dict[str, str], job_description: str)
             
     except Exception as e:
         print(f"Optimization error: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to optimize resume: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to optimize resume content: {str(e)}"
+        )
 
 @app.post("/process-resume/")
 async def process_resume(
@@ -117,12 +127,31 @@ async def process_resume(
     job_description: str = Form(...)
 ) -> StreamingResponse:
     try:
+        if not file.filename.endswith('.docx'):
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid file format. Please upload a .docx file."
+            )
+
         print(f"Processing resume: {file.filename}")
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         
-        content = await file.read()
-        doc = Document(BytesIO(content))
-        template_doc = DocxTemplate(BytesIO(content))
+        try:
+            content = await file.read()
+            if len(content) == 0:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Empty file uploaded. Please try again with a valid document."
+                )
+            
+            doc = Document(BytesIO(content))
+            template_doc = DocxTemplate(BytesIO(content))
+        except Exception as e:
+            print(f"Document processing error: {str(e)}")
+            raise HTTPException(
+                status_code=400,
+                detail="Failed to read document. Please ensure it's a valid .docx file."
+            )
         
         template_vars = extract_template_variables(doc)
         optimized_vars = optimize_resume_content(template_vars, job_description)
@@ -161,6 +190,7 @@ async def process_resume(
             
         except Exception as e:
             print(f"Storage error: {str(e)}")
+            # Continue even if storage fails - we don't want to block the user from getting their resume
         
         output.seek(0)
         return StreamingResponse(
@@ -172,9 +202,14 @@ async def process_resume(
             }
         )
         
+    except HTTPException as he:
+        raise he
     except Exception as e:
         print(f"Processing error: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(
+            status_code=500,
+            detail=str(e)
+        )
 
 @app.get("/health")
 async def health_check():
