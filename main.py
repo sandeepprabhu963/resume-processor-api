@@ -27,7 +27,7 @@ app.add_middleware(
     expose_headers=["Content-Disposition"],
 )
 
-# Initialize Gemini API
+# Initialize Gemini API with safety settings
 api_key = os.getenv("GEMINI_API_KEY")
 if not api_key:
     raise ValueError("GEMINI_API_KEY environment variable is not set")
@@ -41,7 +41,7 @@ if not supabase_url or not supabase_key:
 supabase = create_client(supabase_url, supabase_key)
 
 def docx_to_json(doc: Document) -> Dict[str, str]:
-    """Convert DOCX document to JSON format."""
+    """Convert DOCX document to JSON format with improved section detection."""
     try:
         print("Converting DOCX to JSON...")
         json_data = {}
@@ -53,15 +53,20 @@ def docx_to_json(doc: Document) -> Dict[str, str]:
             if not text:
                 continue
                 
-            # Identify section headers (all caps or ends with colon)
-            if text.isupper() or text.endswith(':'):
+            # Enhanced section header detection
+            if (text.isupper() or text.endswith(':') or 
+                any(header in text.lower() for header in ['summary', 'experience', 'education', 'skills'])):
                 if current_section and section_content:
                     json_data[current_section] = '\n'.join(section_content)
                     section_content = []
                 current_section = text.lower().replace(':', '').strip()
             else:
                 if current_section:
-                    section_content.append(text)
+                    # Preserve bullet points and formatting
+                    if text.startswith('•') or text.startswith('-'):
+                        section_content.append(f"• {text.lstrip('•').lstrip('-').strip()}")
+                    else:
+                        section_content.append(text)
                 elif not current_section and text:
                     current_section = "header"
                     section_content.append(text)
@@ -77,10 +82,19 @@ def docx_to_json(doc: Document) -> Dict[str, str]:
         raise HTTPException(status_code=500, detail=f"Failed to convert resume to JSON: {str(e)}")
 
 def optimize_with_gemini(json_data: Dict[str, str], job_description: str) -> Dict[str, str]:
-    """Optimize resume content using Gemini AI."""
+    """Optimize resume content using Gemini AI with enhanced error handling."""
     try:
         print("Starting Gemini optimization...")
         
+        # Configure the model with safety settings
+        model = genai.GenerativeModel('gemini-pro',
+            safety_settings=[
+                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+            ])
+
         system_prompt = """You are an expert ATS resume optimizer. Analyze the resume content and job description, then return an optimized version that:
         1. Maintains the exact same structure and format as the input resume
         2. Integrates relevant keywords from the job description naturally
@@ -90,7 +104,8 @@ def optimize_with_gemini(json_data: Dict[str, str], job_description: str) -> Dic
         6. Preserves all dates and company names
         7. Keeps the same sections in the same order
         
-        Return ONLY a valid JSON object with the exact same keys as the input resume, containing the optimized content."""
+        Return ONLY a valid JSON object with the exact same keys as the input resume, containing the optimized content.
+        Do not include any explanations or markdown formatting."""
 
         prompt = f"""
         {system_prompt}
@@ -104,27 +119,36 @@ def optimize_with_gemini(json_data: Dict[str, str], job_description: str) -> Dic
         Please optimize the resume content while maintaining the exact same JSON structure.
         """
         
-        model = genai.GenerativeModel('gemini-pro')
-        response = model.generate_content(prompt)
-        
-        if not response.text:
-            raise ValueError("Empty response from Gemini API")
-        
-        # Extract JSON from response
-        json_str = response.text
-        if '```json' in json_str:
-            json_str = json_str.split('```json')[1].split('```')[0]
-        elif '```' in json_str:
-            json_str = json_str.split('```')[1].split('```')[0]
-        
-        optimized_content = json.loads(json_str.strip())
-        
-        # Verify structure matches
-        if set(json_data.keys()) != set(optimized_content.keys()):
-            raise ValueError("Optimized content structure doesn't match original")
-            
-        return optimized_content
-        
+        # Generate content with retry mechanism
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                response = model.generate_content(prompt)
+                if not response.text:
+                    raise ValueError("Empty response from Gemini API")
+                
+                # Extract JSON from response
+                json_str = response.text
+                if '```json' in json_str:
+                    json_str = json_str.split('```json')[1].split('```')[0]
+                elif '```' in json_str:
+                    json_str = json_str.split('```')[1].split('```')[0]
+                
+                optimized_content = json.loads(json_str.strip())
+                
+                # Verify structure matches
+                if set(json_data.keys()) != set(optimized_content.keys()):
+                    raise ValueError("Optimized content structure doesn't match original")
+                    
+                print("Successfully optimized content with Gemini")
+                return optimized_content
+                
+            except Exception as e:
+                if attempt == max_retries - 1:
+                    raise e
+                print(f"Retry {attempt + 1}/{max_retries} after error: {str(e)}")
+                continue
+                
     except Exception as e:
         print(f"Gemini optimization error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to optimize resume content: {str(e)}")
