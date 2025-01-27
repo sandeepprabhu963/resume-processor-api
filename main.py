@@ -17,14 +17,14 @@ load_dotenv()
 
 app = FastAPI()
 
-# Configure CORS with more specific settings
+# Configure CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allows all origins
+    allow_origins=["*"],
     allow_credentials=True,
-    allow_methods=["*"],  # Allows all methods
-    allow_headers=["*"],  # Allows all headers
-    expose_headers=["Content-Disposition"],  # Important for file downloads
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["Content-Disposition"],
 )
 
 # Initialize Gemini API
@@ -62,7 +62,7 @@ def docx_to_json(doc: Document) -> Dict[str, str]:
             else:
                 if current_section:
                     section_content.append(text)
-                elif not current_section and text:  # Handle content before first section
+                elif not current_section and text:
                     current_section = "header"
                     section_content.append(text)
         
@@ -74,10 +74,7 @@ def docx_to_json(doc: Document) -> Dict[str, str]:
         return json_data
     except Exception as e:
         print(f"Error in docx_to_json: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to convert resume to JSON: {str(e)}"
-        )
+        raise HTTPException(status_code=500, detail=f"Failed to convert resume to JSON: {str(e)}")
 
 def optimize_with_gemini(json_data: Dict[str, str], job_description: str) -> Dict[str, str]:
     """Optimize resume content using Gemini AI."""
@@ -93,8 +90,7 @@ def optimize_with_gemini(json_data: Dict[str, str], job_description: str) -> Dic
         6. Preserves all dates and company names
         7. Keeps the same sections in the same order
         
-        Return ONLY a valid JSON object with the exact same keys as the input resume, containing the optimized content.
-        Do not add or remove any sections."""
+        Return ONLY a valid JSON object with the exact same keys as the input resume, containing the optimized content."""
 
         prompt = f"""
         {system_prompt}
@@ -131,13 +127,10 @@ def optimize_with_gemini(json_data: Dict[str, str], job_description: str) -> Dic
         
     except Exception as e:
         print(f"Gemini optimization error: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to optimize resume content: {str(e)}"
-        )
+        raise HTTPException(status_code=500, detail=f"Failed to optimize resume content: {str(e)}")
 
 def json_to_docx(template_doc: DocxTemplate, json_data: Dict[str, str]) -> BytesIO:
-    """Convert JSON back to DOCX format."""
+    """Convert JSON back to DOCX format with improved template handling."""
     try:
         print("Converting JSON back to DOCX...")
         
@@ -146,24 +139,29 @@ def json_to_docx(template_doc: DocxTemplate, json_data: Dict[str, str]) -> Bytes
         
         # Process each section in the JSON data
         for section_name, content in json_data.items():
-            # Convert section name to template variable format
-            template_var = section_name.lower().replace(' ', '_')
+            # Convert section name to a valid template variable
+            template_var = re.sub(r'[^\w]', '_', section_name.lower())
             
-            # Split content into lines and process
+            # Split content into lines for processing
             lines = content.split('\n')
-            formatted_content = []
+            formatted_lines = []
             
             for line in lines:
                 line = line.strip()
                 if line:
                     # Handle bullet points
                     if line.startswith('•') or line.startswith('-'):
-                        formatted_content.append(f"• {line.lstrip('•').lstrip('-').strip()}")
+                        formatted_lines.append(f"• {line.lstrip('•').lstrip('-').strip()}")
                     else:
-                        formatted_content.append(line)
+                        formatted_lines.append(line)
             
-            # Join the lines back together with proper spacing
-            context[template_var] = '\n'.join(formatted_content)
+            # Join lines with proper line breaks for docxtpl
+            context[template_var] = '\n'.join(formatted_lines)
+            
+            # Also provide a bullet-point version for flexibility in templates
+            bullet_points = [line for line in formatted_lines if line.startswith('•')]
+            if bullet_points:
+                context[f"{template_var}_bullets"] = bullet_points
         
         print("Template context prepared:", context)
         
@@ -179,10 +177,7 @@ def json_to_docx(template_doc: DocxTemplate, json_data: Dict[str, str]) -> Bytes
         return output
     except Exception as e:
         print(f"Error in json_to_docx: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to convert to DOCX: {str(e)}"
-        )
+        raise HTTPException(status_code=500, detail=f"Failed to convert to DOCX: {str(e)}")
 
 @app.post("/process-resume/")
 async def process_resume(
@@ -191,10 +186,7 @@ async def process_resume(
 ) -> StreamingResponse:
     try:
         if not file.filename.endswith('.docx'):
-            raise HTTPException(
-                status_code=400,
-                detail="Invalid file format. Please upload a .docx file."
-            )
+            raise HTTPException(status_code=400, detail="Invalid file format. Please upload a .docx file.")
 
         print(f"Processing resume: {file.filename}")
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -202,28 +194,23 @@ async def process_resume(
         # Read and process the document
         content = await file.read()
         if len(content) == 0:
-            raise HTTPException(
-                status_code=400,
-                detail="Empty file uploaded"
-            )
+            raise HTTPException(status_code=400, detail="Empty file uploaded")
         
         # Create Document objects
         doc = Document(BytesIO(content))
         template_doc = DocxTemplate(BytesIO(content))
         
-        # Step 1: Convert DOCX to JSON
+        # Convert DOCX to JSON
         json_data = docx_to_json(doc)
         
-        # Step 2: Save original JSON to Supabase storage
+        # Save original JSON to Supabase
         filename = re.sub(r'[^\w\-\.]', '_', file.filename).strip('_').strip()
         original_json_path = f"original_{timestamp}_{filename}.json"
         
         try:
-            # Convert JSON to string and encode to bytes
             json_str = json.dumps(json_data, ensure_ascii=False, indent=2)
             json_bytes = json_str.encode('utf-8')
             
-            # Upload to Supabase storage
             supabase.storage.from_("resume_templates").upload(
                 original_json_path,
                 json_bytes
@@ -231,21 +218,16 @@ async def process_resume(
             print(f"Original JSON saved to: {original_json_path}")
         except Exception as e:
             print(f"Error saving original JSON: {str(e)}")
-            raise HTTPException(
-                status_code=500,
-                detail=f"Failed to save original JSON: {str(e)}"
-            )
+            raise HTTPException(status_code=500, detail=f"Failed to save original JSON: {str(e)}")
         
-        # Step 3: Optimize JSON using Gemini
+        # Optimize JSON using Gemini
         optimized_json = optimize_with_gemini(json_data, job_description)
         optimized_json_path = f"optimized_{timestamp}_{filename}.json"
         
         try:
-            # Convert optimized JSON to string and encode to bytes
             optimized_json_str = json.dumps(optimized_json, ensure_ascii=False, indent=2)
             optimized_json_bytes = optimized_json_str.encode('utf-8')
             
-            # Upload optimized JSON to Supabase storage
             supabase.storage.from_("resume_templates").upload(
                 optimized_json_path,
                 optimized_json_bytes
@@ -253,15 +235,12 @@ async def process_resume(
             print(f"Optimized JSON saved to: {optimized_json_path}")
         except Exception as e:
             print(f"Error saving optimized JSON: {str(e)}")
-            raise HTTPException(
-                status_code=500,
-                detail=f"Failed to save optimized JSON: {str(e)}"
-            )
+            raise HTTPException(status_code=500, detail=f"Failed to save optimized JSON: {str(e)}")
         
-        # Step 4: Convert optimized JSON back to DOCX
+        # Convert optimized JSON back to DOCX
         output = json_to_docx(template_doc, optimized_json)
         
-        # Store optimization record in database
+        # Store optimization record
         try:
             supabase.table('resume_optimizations').insert({
                 'original_resume_path': original_json_path,
@@ -272,7 +251,6 @@ async def process_resume(
             print("Optimization record stored in database")
         except Exception as e:
             print(f"Error storing optimization record: {str(e)}")
-            # Continue even if record storage fails
         
         return StreamingResponse(
             output,
@@ -287,10 +265,7 @@ async def process_resume(
         raise he
     except Exception as e:
         print(f"Processing error: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail=str(e)
-        )
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/health")
 async def health_check():
