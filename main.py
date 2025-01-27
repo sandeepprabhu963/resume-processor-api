@@ -47,6 +47,7 @@ class ResumeResponse(BaseModel):
 
 def extract_template_variables(doc: Document) -> Dict[str, str]:
     try:
+        print("Starting template variable extraction...")
         variables = {}
         current_section = None
         section_content = []
@@ -68,10 +69,10 @@ def extract_template_variables(doc: Document) -> Dict[str, str]:
         if current_section and section_content:
             variables[current_section] = '\n'.join(section_content)
             
-        print("Extracted variables:", variables)
+        print("Extracted variables:", json.dumps(variables, indent=2))
         return variables
     except Exception as e:
-        print(f"Error extracting template variables: {str(e)}")
+        print(f"Error in extract_template_variables: {str(e)}")
         raise HTTPException(
             status_code=500,
             detail=f"Failed to process resume template: {str(e)}"
@@ -79,8 +80,9 @@ def extract_template_variables(doc: Document) -> Dict[str, str]:
 
 def optimize_resume_content(template_vars: Dict[str, str], job_description: str) -> Dict[str, str]:
     try:
-        # Convert template_vars to a properly formatted JSON string
-        template_vars_json = json.dumps(template_vars, ensure_ascii=False)
+        print("Starting resume optimization...")
+        print("Template variables:", json.dumps(template_vars, indent=2))
+        print("Job description:", job_description)
         
         system_prompt = """You are an expert ATS resume optimizer. Your task is to optimize the resume content while maintaining the exact format:
         1. Return ONLY a valid JSON object with the same keys as input
@@ -95,23 +97,18 @@ def optimize_resume_content(template_vars: Dict[str, str], job_description: str)
         3. DO NOT change structure or formatting
         4. Focus on relevant skills and natural keyword integration"""
 
-        print("Sending request to OpenAI with template vars:", template_vars_json)
-        print("Job description:", job_description)
-        
         response = client.chat.completions.create(
-            model="gpt-4o",  # Using the recommended model
+            model="gpt-4o",
             messages=[
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"Original Resume:\n{template_vars_json}\n\nJob Description:\n{job_description}"}
+                {"role": "user", "content": f"Original Resume:\n{json.dumps(template_vars, ensure_ascii=False)}\n\nJob Description:\n{job_description}"}
             ],
             temperature=0.7
         )
         
-        # Get the response content
         response_content = response.choices[0].message.content
-        print("Received response from OpenAI:", response_content)
+        print("OpenAI response:", response_content)
         
-        # Parse the response content as JSON
         try:
             optimized_content = json.loads(response_content)
             print("Successfully parsed optimized content")
