@@ -102,7 +102,7 @@ def optimize_resume_content(template_vars: Dict[str, str], job_description: str)
             if not template_vars or not job_description:
                 raise ValueError("Missing required input data")
 
-            # Make API call with validated data
+            print("Making OpenAI API call...")
             response = client.chat.completions.create(
                 model="gpt-4o",
                 messages=[
@@ -110,8 +110,10 @@ def optimize_resume_content(template_vars: Dict[str, str], job_description: str)
                     {"role": "user", "content": f"Original Resume:\n{json.dumps(template_vars, ensure_ascii=False)}\n\nJob Description:\n{job_description}"}
                 ],
                 temperature=0.7,
-                max_tokens=2000  # Add reasonable token limit
+                max_tokens=2000
             )
+            
+            print("OpenAI API response received")
             
             # Validate API response
             if not response or not response.choices:
