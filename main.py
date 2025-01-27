@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
 from docx import Document
 from docxtpl import DocxTemplate
-from openai import OpenAI
+import google.generativeai as genai
 import json
 import os
 from io import BytesIO
@@ -27,11 +27,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize OpenAI client
-api_key = os.getenv("OPENAI_API_KEY")
+# Initialize Gemini API
+api_key = os.getenv("GEMINI_API_KEY")
 if not api_key:
-    raise ValueError("OPENAI_API_KEY environment variable is not set")
-client = OpenAI(api_key=api_key)
+    raise ValueError("GEMINI_API_KEY environment variable is not set")
+genai.configure(api_key=api_key)
 
 # Initialize Supabase client
 supabase_url = os.getenv("SUPABASE_URL")
@@ -102,31 +102,19 @@ def optimize_resume_content(template_vars: Dict[str, str], job_description: str)
             raise ValueError("Missing required input data")
 
         try:
-            print("Making OpenAI API call...")
-            response = client.chat.completions.create(
-                model="gpt-4o-mini",  # Changed to gpt-4o-mini for faster processing
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": f"Original Resume:\n{json.dumps(template_vars, ensure_ascii=False)}\n\nJob Description:\n{job_description}"}
-                ],
-                temperature=0.7,
-                max_tokens=2000
-            )
+            print("Making Gemini API call...")
+            model = genai.GenerativeModel('gemini-pro')
+            prompt = f"{system_prompt}\n\nOriginal Resume:\n{json.dumps(template_vars, ensure_ascii=False)}\n\nJob Description:\n{job_description}"
             
-            print("OpenAI API response received")
-            print("Raw response:", response)
+            response = model.generate_content(prompt)
+            print("Gemini API response received")
+            print("Raw response:", response.text)
             
-            if not response.choices or len(response.choices) == 0:
-                raise ValueError("Empty response from OpenAI API")
-                
-            response_content = response.choices[0].message.content
-            if not response_content:
-                raise ValueError("Empty message content from OpenAI API")
-            
-            print("Response content:", response_content)
+            if not response.text:
+                raise ValueError("Empty response from Gemini API")
             
             try:
-                optimized_content = json.loads(response_content)
+                optimized_content = json.loads(response.text)
                 if not isinstance(optimized_content, dict):
                     raise ValueError("Response is not a valid JSON object")
                 
@@ -135,12 +123,12 @@ def optimize_resume_content(template_vars: Dict[str, str], job_description: str)
                 
             except json.JSONDecodeError as e:
                 print(f"JSON parsing error: {str(e)}")
-                print(f"Failed to parse content: {response_content}")
-                raise ValueError(f"Failed to parse OpenAI response: {str(e)}")
+                print(f"Failed to parse content: {response.text}")
+                raise ValueError(f"Failed to parse Gemini response: {str(e)}")
                 
         except Exception as api_error:
-            print(f"OpenAI API error: {str(api_error)}")
-            raise ValueError(f"OpenAI API error: {str(api_error)}")
+            print(f"Gemini API error: {str(api_error)}")
+            raise ValueError(f"Gemini API error: {str(api_error)}")
             
     except Exception as e:
         print(f"Optimization error: {str(e)}")
