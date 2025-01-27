@@ -11,4 +11,4 @@ supabase==1.2.0
 spacy<3.7.0
 nltk==3.8.1
 # Install spacy model directly
-https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.6.0/en_core_web_sm-3.6.0-py3-none-any.whl</lov-write>
+https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.6.0/en_core_web_sm-3.6.0.tar.gz
