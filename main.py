@@ -27,16 +27,162 @@ app.add_middleware(
     expose_headers=["Content-Disposition"],  # Important for file downloads
 )
 
-# ... keep existing code (API key configuration and Supabase client initialization)
+# Initialize Gemini API
+api_key = os.getenv("GEMINI_API_KEY")
+if not api_key:
+    raise ValueError("GEMINI_API_KEY environment variable is not set")
+genai.configure(api_key=api_key)
+
+# Initialize Supabase client
+supabase_url = os.getenv("SUPABASE_URL")
+supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+if not supabase_url or not supabase_key:
+    raise ValueError("Supabase environment variables are not properly set")
+supabase = create_client(supabase_url, supabase_key)
 
 def docx_to_json(doc: Document) -> Dict[str, str]:
-    # ... keep existing code (docx to json conversion function)
+    """Convert DOCX document to JSON format."""
+    try:
+        print("Converting DOCX to JSON...")
+        json_data = {}
+        current_section = None
+        section_content = []
+        
+        for paragraph in doc.paragraphs:
+            text = paragraph.text.strip()
+            if not text:
+                continue
+                
+            # Identify section headers (all caps or ends with colon)
+            if text.isupper() or text.endswith(':'):
+                if current_section and section_content:
+                    json_data[current_section] = '\n'.join(section_content)
+                    section_content = []
+                current_section = text.lower().replace(':', '').strip()
+            else:
+                if current_section:
+                    section_content.append(text)
+                elif not current_section and text:  # Handle content before first section
+                    current_section = "header"
+                    section_content.append(text)
+        
+        # Add the last section
+        if current_section and section_content:
+            json_data[current_section] = '\n'.join(section_content)
+            
+        print("Successfully converted DOCX to JSON")
+        return json_data
+    except Exception as e:
+        print(f"Error in docx_to_json: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to convert resume to JSON: {str(e)}"
+        )
 
 def optimize_with_gemini(json_data: Dict[str, str], job_description: str) -> Dict[str, str]:
-    # ... keep existing code (Gemini optimization function)
+    """Optimize resume content using Gemini AI."""
+    try:
+        print("Starting Gemini optimization...")
+        
+        system_prompt = """You are an expert ATS resume optimizer. Analyze the resume content and job description, then return an optimized version that:
+        1. Maintains the exact same structure and format as the input resume
+        2. Integrates relevant keywords from the job description naturally
+        3. Emphasizes matching skills and experiences
+        4. Uses strong action verbs
+        5. Includes metrics where possible
+        6. Preserves all dates and company names
+        7. Keeps the same sections in the same order
+        
+        Return ONLY a valid JSON object with the exact same keys as the input resume, containing the optimized content.
+        Do not add or remove any sections."""
+
+        prompt = f"""
+        {system_prompt}
+
+        Original Resume Content:
+        {json.dumps(json_data, ensure_ascii=False, indent=2)}
+
+        Job Description:
+        {job_description}
+
+        Please optimize the resume content while maintaining the exact same JSON structure.
+        """
+        
+        model = genai.GenerativeModel('gemini-pro')
+        response = model.generate_content(prompt)
+        
+        if not response.text:
+            raise ValueError("Empty response from Gemini API")
+        
+        # Extract JSON from response
+        json_str = response.text
+        if '```json' in json_str:
+            json_str = json_str.split('```json')[1].split('```')[0]
+        elif '```' in json_str:
+            json_str = json_str.split('```')[1].split('```')[0]
+        
+        optimized_content = json.loads(json_str.strip())
+        
+        # Verify structure matches
+        if set(json_data.keys()) != set(optimized_content.keys()):
+            raise ValueError("Optimized content structure doesn't match original")
+            
+        return optimized_content
+        
+    except Exception as e:
+        print(f"Gemini optimization error: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to optimize resume content: {str(e)}"
+        )
 
 def json_to_docx(template_doc: DocxTemplate, json_data: Dict[str, str]) -> BytesIO:
-    # ... keep existing code (json to docx conversion function)
+    """Convert JSON back to DOCX format."""
+    try:
+        print("Converting JSON back to DOCX...")
+        
+        # Create a context dictionary for the template
+        context = {}
+        
+        # Process each section in the JSON data
+        for section_name, content in json_data.items():
+            # Convert section name to template variable format
+            template_var = section_name.lower().replace(' ', '_')
+            
+            # Split content into lines and process
+            lines = content.split('\n')
+            formatted_content = []
+            
+            for line in lines:
+                line = line.strip()
+                if line:
+                    # Handle bullet points
+                    if line.startswith('•') or line.startswith('-'):
+                        formatted_content.append(f"• {line.lstrip('•').lstrip('-').strip()}")
+                    else:
+                        formatted_content.append(line)
+            
+            # Join the lines back together with proper spacing
+            context[template_var] = '\n'.join(formatted_content)
+        
+        print("Template context prepared:", context)
+        
+        # Render the template with our context
+        template_doc.render(context)
+        
+        # Save to BytesIO
+        output = BytesIO()
+        template_doc.save(output)
+        output.seek(0)
+        
+        print("Successfully converted JSON to DOCX")
+        return output
+    except Exception as e:
+        print(f"Error in json_to_docx: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to convert to DOCX: {str(e)}"
+        )
 
 @app.post("/process-resume/")
 async def process_resume(
@@ -65,44 +211,68 @@ async def process_resume(
         doc = Document(BytesIO(content))
         template_doc = DocxTemplate(BytesIO(content))
         
-        # Process the resume
+        # Step 1: Convert DOCX to JSON
         json_data = docx_to_json(doc)
-        optimized_json = optimize_with_gemini(json_data, job_description)
-        output = json_to_docx(template_doc, optimized_json)
         
-        # Store files in Supabase and create record
+        # Step 2: Save original JSON to Supabase storage
+        filename = re.sub(r'[^\w\-\.]', '_', file.filename).strip('_').strip()
+        original_json_path = f"original_{timestamp}_{filename}.json"
+        
         try:
-            filename = re.sub(r'[^\w\-\.]', '_', file.filename).strip('_').strip()
-            
-            # Save original JSON
-            original_json_path = f"original_{timestamp}_{filename}.json"
+            # Convert JSON to string and encode to bytes
             json_str = json.dumps(json_data, ensure_ascii=False, indent=2)
             json_bytes = json_str.encode('utf-8')
+            
+            # Upload to Supabase storage
             supabase.storage.from_("resume_templates").upload(
                 original_json_path,
                 json_bytes
             )
-            
-            # Save optimized JSON
-            optimized_json_path = f"optimized_{timestamp}_{filename}.json"
+            print(f"Original JSON saved to: {original_json_path}")
+        except Exception as e:
+            print(f"Error saving original JSON: {str(e)}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to save original JSON: {str(e)}"
+            )
+        
+        # Step 3: Optimize JSON using Gemini
+        optimized_json = optimize_with_gemini(json_data, job_description)
+        optimized_json_path = f"optimized_{timestamp}_{filename}.json"
+        
+        try:
+            # Convert optimized JSON to string and encode to bytes
             optimized_json_str = json.dumps(optimized_json, ensure_ascii=False, indent=2)
             optimized_json_bytes = optimized_json_str.encode('utf-8')
+            
+            # Upload optimized JSON to Supabase storage
             supabase.storage.from_("resume_templates").upload(
                 optimized_json_path,
                 optimized_json_bytes
             )
-            
-            # Store optimization record
+            print(f"Optimized JSON saved to: {optimized_json_path}")
+        except Exception as e:
+            print(f"Error saving optimized JSON: {str(e)}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to save optimized JSON: {str(e)}"
+            )
+        
+        # Step 4: Convert optimized JSON back to DOCX
+        output = json_to_docx(template_doc, optimized_json)
+        
+        # Store optimization record in database
+        try:
             supabase.table('resume_optimizations').insert({
                 'original_resume_path': original_json_path,
                 'optimized_resume_path': optimized_json_path,
                 'job_description': job_description,
                 'status': 'completed'
             }).execute()
-            
+            print("Optimization record stored in database")
         except Exception as e:
-            print(f"Supabase storage error: {str(e)}")
-            # Continue even if storage fails
+            print(f"Error storing optimization record: {str(e)}")
+            # Continue even if record storage fails
         
         return StreamingResponse(
             output,
