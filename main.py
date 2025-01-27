@@ -97,42 +97,48 @@ def optimize_resume_content(template_vars: Dict[str, str], job_description: str)
         3. DO NOT change structure or formatting
         4. Focus on relevant skills and natural keyword integration"""
 
-        response = client.chat.completions.create(
-            model="gpt-4o",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"Original Resume:\n{json.dumps(template_vars, ensure_ascii=False)}\n\nJob Description:\n{job_description}"}
-            ],
-            temperature=0.7
-        )
-        
-        response_content = response.choices[0].message.content
-        print("OpenAI response:", response_content)
-        
         try:
-            optimized_content = json.loads(response_content)
-            print("Successfully parsed optimized content")
-        except json.JSONDecodeError as e:
-            print(f"JSON parsing error: {str(e)}")
-            print(f"Response content that failed to parse: {response_content}")
-            raise HTTPException(
-                status_code=500,
-                detail=f"Failed to parse optimized content: {str(e)}"
+            response = client.chat.completions.create(
+                model="gpt-4o",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": f"Original Resume:\n{json.dumps(template_vars, ensure_ascii=False)}\n\nJob Description:\n{job_description}"}
+                ],
+                temperature=0.7
             )
-        
-        # Validate and maintain structure
-        for key in template_vars.keys():
-            if key not in optimized_content:
-                print(f"Missing key in optimized content: {key}")
-                optimized_content[key] = template_vars[key]
-            else:
-                orig_lines = template_vars[key].split('\n')
-                opt_lines = optimized_content[key].split('\n')
-                if len(orig_lines) != len(opt_lines):
-                    print(f"Line count mismatch for {key}: original={len(orig_lines)}, optimized={len(opt_lines)}")
-                    optimized_content[key] = template_vars[key]
-                    
-        return optimized_content
+            
+            if not response.choices or not response.choices[0].message:
+                raise ValueError("No response received from OpenAI API")
+                
+            response_content = response.choices[0].message.content
+            print("OpenAI response:", response_content)
+            
+            try:
+                optimized_content = json.loads(response_content)
+                print("Successfully parsed optimized content")
+                
+                # Validate and maintain structure
+                for key in template_vars.keys():
+                    if key not in optimized_content:
+                        print(f"Missing key in optimized content: {key}")
+                        optimized_content[key] = template_vars[key]
+                    else:
+                        orig_lines = template_vars[key].split('\n')
+                        opt_lines = optimized_content[key].split('\n')
+                        if len(orig_lines) != len(opt_lines):
+                            print(f"Line count mismatch for {key}")
+                            optimized_content[key] = template_vars[key]
+                            
+                return optimized_content
+                
+            except json.JSONDecodeError as e:
+                print(f"JSON parsing error: {str(e)}")
+                print(f"Response content that failed to parse: {response_content}")
+                raise ValueError(f"Failed to parse OpenAI response: {str(e)}")
+                
+        except Exception as api_error:
+            print(f"OpenAI API error: {str(api_error)}")
+            raise ValueError(f"OpenAI API error: {str(api_error)}")
             
     except Exception as e:
         print(f"Optimization error: {str(e)}")
@@ -210,7 +216,7 @@ async def process_resume(
             
         except Exception as e:
             print(f"Storage error: {str(e)}")
-            # Continue even if storage fails - we don't want to block the user from getting their resume
+            # Continue even if storage fails
         
         output.seek(0)
         return StreamingResponse(
