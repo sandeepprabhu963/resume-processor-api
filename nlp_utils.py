@@ -1,35 +1,53 @@
-import spacy
 import nltk
-from nltk.tokenize import word_tokenize
+from nltk.tokenize import word_tokenize, sent_tokenize
 from nltk.corpus import stopwords
-from nltk.tokenize import sent_tokenize
+from nltk.tag import pos_tag
 import re
 
 # Download required NLTK data
 nltk.download('punkt')
 nltk.download('stopwords')
 nltk.download('averaged_perceptron_tagger')
-
-# Load spaCy model
-nlp = spacy.load('en_core_web_sm')
+nltk.download('maxent_ne_chunker')
+nltk.download('words')
 
 def extract_key_phrases(text):
-    """Extract important phrases and keywords from text."""
-    doc = nlp(text)
+    """Extract important phrases and keywords from text using NLTK."""
+    # Tokenize text
+    tokens = word_tokenize(text)
     
-    # Extract named entities
-    entities = [(ent.text, ent.label_) for ent in doc.ents]
+    # Remove stopwords
+    stop_words = set(stopwords.words('english'))
+    tokens = [token.lower() for token in tokens if token.lower() not in stop_words]
     
-    # Extract noun phrases
-    noun_phrases = [chunk.text for chunk in doc.noun_chunks]
+    # Get parts of speech
+    pos_tags = pos_tag(tokens)
     
     # Extract technical skills and keywords
     skills_pattern = r'\b(?:Python|Java|SQL|AWS|Azure|GCP|Docker|Kubernetes|React|Angular|Vue|Node\.js|JavaScript|TypeScript|C\+\+|Ruby|PHP|HTML|CSS|REST|API|ML|AI|DevOps|CI/CD|Git|Agile|Scrum)\b'
     technical_skills = list(set(re.findall(skills_pattern, text, re.IGNORECASE)))
     
+    # Extract noun phrases (simplified)
+    noun_phrases = []
+    current_phrase = []
+    for word, tag in pos_tags:
+        if tag.startswith('NN'):
+            current_phrase.append(word)
+        elif current_phrase:
+            noun_phrases.append(' '.join(current_phrase))
+            current_phrase = []
+    if current_phrase:
+        noun_phrases.append(' '.join(current_phrase))
+    
+    # Extract named entities (simplified)
+    entities = []
+    for chunk in nltk.ne_chunk(pos_tags):
+        if hasattr(chunk, 'label'):
+            entities.append(((' '.join(c[0] for c in chunk)), chunk.label()))
+    
     return {
         'entities': entities,
-        'noun_phrases': noun_phrases,
+        'noun_phrases': list(set(noun_phrases)),
         'technical_skills': technical_skills
     }
 
