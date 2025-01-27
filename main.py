@@ -97,14 +97,14 @@ def optimize_resume_content(template_vars: Dict[str, str], job_description: str)
         3. DO NOT change structure or formatting
         4. Focus on relevant skills and natural keyword integration"""
 
-        try:
-            # Validate input data
-            if not template_vars or not job_description:
-                raise ValueError("Missing required input data")
+        # Validate input data
+        if not template_vars or not job_description:
+            raise ValueError("Missing required input data")
 
+        try:
             print("Making OpenAI API call...")
             response = client.chat.completions.create(
-                model="gpt-4o",
+                model="gpt-4o-mini",  # Changed to gpt-4o-mini for faster processing
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": f"Original Resume:\n{json.dumps(template_vars, ensure_ascii=False)}\n\nJob Description:\n{job_description}"}
@@ -114,45 +114,28 @@ def optimize_resume_content(template_vars: Dict[str, str], job_description: str)
             )
             
             print("OpenAI API response received")
+            print("Raw response:", response)
             
-            # Validate API response
-            if not response or not response.choices:
-                raise ValueError("Invalid response structure from OpenAI API")
-            
-            if not response.choices[0] or not response.choices[0].message:
-                raise ValueError("No message content in OpenAI response")
-            
+            if not response.choices or len(response.choices) == 0:
+                raise ValueError("Empty response from OpenAI API")
+                
             response_content = response.choices[0].message.content
             if not response_content:
-                raise ValueError("Empty response content from OpenAI API")
+                raise ValueError("Empty message content from OpenAI API")
             
-            print("Raw OpenAI response:", response_content)
+            print("Response content:", response_content)
             
-            # Parse and validate JSON response
             try:
                 optimized_content = json.loads(response_content)
                 if not isinstance(optimized_content, dict):
-                    raise ValueError("OpenAI response is not a valid JSON object")
+                    raise ValueError("Response is not a valid JSON object")
                 
                 print("Successfully parsed optimized content")
-                
-                # Validate structure matches original
-                for key in template_vars.keys():
-                    if key not in optimized_content:
-                        print(f"Missing key in optimized content: {key}")
-                        optimized_content[key] = template_vars[key]
-                    else:
-                        orig_lines = template_vars[key].split('\n')
-                        opt_lines = optimized_content[key].split('\n')
-                        if len(orig_lines) != len(opt_lines):
-                            print(f"Line count mismatch for {key}")
-                            optimized_content[key] = template_vars[key]
-                
                 return optimized_content
                 
             except json.JSONDecodeError as e:
                 print(f"JSON parsing error: {str(e)}")
-                print(f"Response content that failed to parse: {response_content}")
+                print(f"Failed to parse content: {response_content}")
                 raise ValueError(f"Failed to parse OpenAI response: {str(e)}")
                 
         except Exception as api_error:
