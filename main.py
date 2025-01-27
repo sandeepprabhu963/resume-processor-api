@@ -15,104 +15,112 @@ from supabase import create_client
 
 load_dotenv()
 
-# ... keep existing code (FastAPI setup and middleware configuration)
+app = FastAPI()
+
+# Configure CORS with more specific settings
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Allows all origins
+    allow_credentials=True,
+    allow_methods=["*"],  # Allows all methods
+    allow_headers=["*"],  # Allows all headers
+    expose_headers=["Content-Disposition"],  # Important for file downloads
+)
+
+# ... keep existing code (API key configuration and Supabase client initialization)
 
 def docx_to_json(doc: Document) -> Dict[str, str]:
-    """Convert DOCX document to JSON format."""
-    try:
-        print("Converting DOCX to JSON...")
-        json_data = {}
-        current_section = None
-        section_content = []
-        
-        for paragraph in doc.paragraphs:
-            text = paragraph.text.strip()
-            if not text:
-                continue
-                
-            # Identify section headers (all caps or ends with colon)
-            if text.isupper() or text.endswith(':'):
-                if current_section and section_content:
-                    json_data[current_section] = '\n'.join(section_content)
-                    section_content = []
-                current_section = text.lower().replace(':', '').strip()
-            else:
-                if current_section:
-                    section_content.append(text)
-                elif not current_section and text:  # Handle content before first section
-                    current_section = "header"
-                    section_content.append(text)
-        
-        # Add the last section
-        if current_section and section_content:
-            json_data[current_section] = '\n'.join(section_content)
-            
-        print("Successfully converted DOCX to JSON")
-        return json_data
-    except Exception as e:
-        print(f"Error in docx_to_json: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to convert resume to JSON: {str(e)}"
-        )
+    # ... keep existing code (docx to json conversion function)
 
 def optimize_with_gemini(json_data: Dict[str, str], job_description: str) -> Dict[str, str]:
     # ... keep existing code (Gemini optimization function)
 
 def json_to_docx(template_doc: DocxTemplate, json_data: Dict[str, str]) -> BytesIO:
-    """Convert JSON back to DOCX format."""
-    try:
-        print("Converting JSON back to DOCX...")
-        
-        # Create a context dictionary for the template
-        context = {}
-        
-        # Process each section in the JSON data
-        for section_name, content in json_data.items():
-            # Convert section name to template variable format
-            template_var = section_name.lower().replace(' ', '_')
-            
-            # Split content into lines and process
-            lines = content.split('\n')
-            formatted_content = []
-            
-            for line in lines:
-                line = line.strip()
-                if line:
-                    # Handle bullet points
-                    if line.startswith('•') or line.startswith('-'):
-                        formatted_content.append(f"• {line.lstrip('•').lstrip('-').strip()}")
-                    else:
-                        formatted_content.append(line)
-            
-            # Join the lines back together with proper spacing
-            context[template_var] = '\n'.join(formatted_content)
-        
-        print("Template context prepared:", context)
-        
-        # Render the template with our context
-        template_doc.render(context)
-        
-        # Save to BytesIO
-        output = BytesIO()
-        template_doc.save(output)
-        output.seek(0)
-        
-        print("Successfully converted JSON to DOCX")
-        return output
-    except Exception as e:
-        print(f"Error in json_to_docx: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to convert to DOCX: {str(e)}"
-        )
+    # ... keep existing code (json to docx conversion function)
 
 @app.post("/process-resume/")
 async def process_resume(
     file: UploadFile = File(...),
     job_description: str = Form(...)
 ) -> StreamingResponse:
-    # ... keep existing code (main process_resume function)
+    try:
+        if not file.filename.endswith('.docx'):
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid file format. Please upload a .docx file."
+            )
+
+        print(f"Processing resume: {file.filename}")
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        
+        # Read and process the document
+        content = await file.read()
+        if len(content) == 0:
+            raise HTTPException(
+                status_code=400,
+                detail="Empty file uploaded"
+            )
+        
+        # Create Document objects
+        doc = Document(BytesIO(content))
+        template_doc = DocxTemplate(BytesIO(content))
+        
+        # Process the resume
+        json_data = docx_to_json(doc)
+        optimized_json = optimize_with_gemini(json_data, job_description)
+        output = json_to_docx(template_doc, optimized_json)
+        
+        # Store files in Supabase and create record
+        try:
+            filename = re.sub(r'[^\w\-\.]', '_', file.filename).strip('_').strip()
+            
+            # Save original JSON
+            original_json_path = f"original_{timestamp}_{filename}.json"
+            json_str = json.dumps(json_data, ensure_ascii=False, indent=2)
+            json_bytes = json_str.encode('utf-8')
+            supabase.storage.from_("resume_templates").upload(
+                original_json_path,
+                json_bytes
+            )
+            
+            # Save optimized JSON
+            optimized_json_path = f"optimized_{timestamp}_{filename}.json"
+            optimized_json_str = json.dumps(optimized_json, ensure_ascii=False, indent=2)
+            optimized_json_bytes = optimized_json_str.encode('utf-8')
+            supabase.storage.from_("resume_templates").upload(
+                optimized_json_path,
+                optimized_json_bytes
+            )
+            
+            # Store optimization record
+            supabase.table('resume_optimizations').insert({
+                'original_resume_path': original_json_path,
+                'optimized_resume_path': optimized_json_path,
+                'job_description': job_description,
+                'status': 'completed'
+            }).execute()
+            
+        except Exception as e:
+            print(f"Supabase storage error: {str(e)}")
+            # Continue even if storage fails
+        
+        return StreamingResponse(
+            output,
+            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            headers={
+                "Content-Disposition": f"attachment; filename=optimized_{filename}",
+                "Access-Control-Expose-Headers": "Content-Disposition"
+            }
+        )
+        
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        print(f"Processing error: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=str(e)
+        )
 
 @app.get("/health")
 async def health_check():
