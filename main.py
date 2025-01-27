@@ -16,9 +16,13 @@ import nltk
 from nltk.tokenize import word_tokenize
 from nltk.corpus import stopwords
 
-# Download required NLTK data
-nltk.download('punkt')
-nltk.download('stopwords')
+# Initialize NLTK data
+try:
+    nltk.data.find('tokenizers/punkt')
+    nltk.data.find('corpora/stopwords')
+except LookupError:
+    nltk.download('punkt')
+    nltk.download('stopwords')
 
 load_dotenv()
 
@@ -33,12 +37,13 @@ app.add_middleware(
     max_age=3600,
 )
 
-# Initialize clients
+# Initialize OpenAI client
 api_key = os.getenv("OPENAI_API_KEY")
 if not api_key:
     raise ValueError("OPENAI_API_KEY environment variable is not set")
 client = OpenAI(api_key=api_key)
 
+# Initialize Supabase client
 supabase_url = os.getenv("SUPABASE_URL")
 supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 if not supabase_url or not supabase_key:
@@ -47,12 +52,10 @@ supabase = create_client(supabase_url, supabase_key)
 
 def analyze_text(text: str) -> Dict[str, Any]:
     """Analyze text using NLTK for keyword extraction."""
-    # Tokenize and remove stopwords
     tokens = word_tokenize(text.lower())
     stop_words = set(stopwords.words('english'))
     tokens = [token for token in tokens if token not in stop_words]
     
-    # Extract technical skills
     skills_pattern = r'\b(?:Python|Java|SQL|AWS|Azure|GCP|Docker|Kubernetes|React|Angular|Vue|Node\.js|JavaScript|TypeScript|C\+\+|Ruby|PHP|HTML|CSS|REST|API|ML|AI|DevOps|CI/CD|Git|Agile|Scrum)\b'
     technical_skills = list(set(re.findall(skills_pattern, text, re.IGNORECASE)))
     
@@ -91,7 +94,6 @@ def extract_template_variables(doc: Document) -> Dict[str, str]:
 def optimize_resume_content(template_vars: Dict[str, str], job_description: str) -> Dict[str, str]:
     """Optimize resume content while preserving format."""
     try:
-        # Analyze job description
         job_analysis = analyze_text(job_description)
         
         system_prompt = """You are an expert ATS resume optimizer. Your task is to optimize the resume content while maintaining the exact format:
@@ -123,10 +125,8 @@ def optimize_resume_content(template_vars: Dict[str, str], job_description: str)
             
         optimized_content = json.loads(response_content)
         
-        # Verify structure preservation
         for key in template_vars.keys():
             if key not in optimized_content:
-                print(f"Missing key in optimization: {key}")
                 optimized_content[key] = template_vars[key]
                 
         return optimized_content
@@ -141,43 +141,29 @@ async def process_resume(
     job_description: str = Form(...)
 ):
     try:
-        print(f"Processing resume: {file.filename}")
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        
         content = await file.read()
         doc = Document(BytesIO(content))
         template_doc = DocxTemplate(BytesIO(content))
         
-        # Extract and optimize content
         template_vars = extract_template_variables(doc)
         optimized_vars = optimize_resume_content(template_vars, job_description)
         
-        # Render optimized content while preserving formatting
         template_doc.render(optimized_vars)
         
         output = BytesIO()
         template_doc.save(output)
         output.seek(0)
         
-        # Store in Supabase
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = re.sub(r'[^\w\-\.]', '_', file.filename).strip('_').strip()
         
         try:
-            # Upload original resume
             original_path = f"original_{timestamp}_{filename}"
-            supabase.storage.from_("resume_templates").upload(
-                original_path,
-                content
-            )
-            
-            # Upload optimized resume
             optimized_path = f"optimized_{timestamp}_{filename}"
-            supabase.storage.from_("resume_templates").upload(
-                optimized_path,
-                output.getvalue()
-            )
             
-            # Store optimization record
+            supabase.storage.from_("resume_templates").upload(original_path, content)
+            supabase.storage.from_("resume_templates").upload(optimized_path, output.getvalue())
+            
             supabase.table('resume_optimizations').insert({
                 'original_resume_path': original_path,
                 'optimized_resume_path': optimized_path,
@@ -202,15 +188,6 @@ async def process_resume(
     except Exception as e:
         print(f"Processing error: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
-
-@app.options("/process-resume/")
-async def options_process_resume():
-    return {
-        "allow": "POST,OPTIONS",
-        "content-type": "multipart/form-data",
-        "access-control-allow-headers": "Content-Type,Authorization",
-        "access-control-allow-origin": "*"
-    }
 
 @app.get("/health")
 async def health_check():
