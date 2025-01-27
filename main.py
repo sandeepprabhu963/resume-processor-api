@@ -59,7 +59,7 @@ def analyze_text(text: str) -> Dict[str, Any]:
     technical_skills = list(set(re.findall(skills_pattern, text, re.IGNORECASE)))
     
     return {
-        'keywords': tokens,
+        'keywords': tokens[:50],  # Limit to top 50 keywords
         'technical_skills': technical_skills
     }
 
@@ -81,8 +81,6 @@ def extract_template_variables(doc: Document) -> Dict[str, str]:
             current_section = text.lower().replace(':', '').strip()
         else:
             if current_section:
-                if paragraph.style.name.startswith('List'):
-                    text = f"• {text}"
                 section_content.append(text)
             
     if current_section and section_content:
@@ -95,7 +93,7 @@ def optimize_resume_content(template_vars: Dict[str, str], job_description: str)
     try:
         job_analysis = analyze_text(job_description)
         
-        system_prompt = """You are an expert ATS resume optimizer. Your task is to optimize the resume content while maintaining the exact format:
+        system_prompt = """You are an expert ATS resume optimizer. Optimize the resume content while maintaining format:
         1. Return ONLY a valid JSON object with the same keys as input
         2. For each section:
            - Keep exact format (bullets, spacing)
@@ -106,8 +104,7 @@ def optimize_resume_content(template_vars: Dict[str, str], job_description: str)
            - Keep same number of lines
            - Keep dates and company names
         3. DO NOT change structure or formatting
-        4. Focus on relevant skills and natural keyword integration
-        Return only the JSON object, nothing else."""
+        4. Focus on relevant skills and natural keyword integration"""
 
         response = client.chat.completions.create(
             model="gpt-4",
@@ -118,16 +115,7 @@ def optimize_resume_content(template_vars: Dict[str, str], job_description: str)
             temperature=0.7
         )
         
-        response_content = response.choices[0].message.content
-        if not response_content:
-            raise ValueError("Empty response from OpenAI")
-            
-        optimized_content = json.loads(response_content)
-        
-        for key in template_vars.keys():
-            if key not in optimized_content:
-                optimized_content[key] = template_vars[key]
-                
+        optimized_content = json.loads(response.choices[0].message.content)
         return optimized_content
             
     except Exception as e:
