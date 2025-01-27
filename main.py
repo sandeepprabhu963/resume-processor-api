@@ -12,6 +12,17 @@ from dotenv import load_dotenv
 from datetime import datetime
 import re
 from supabase import create_client
+import spacy
+import nltk
+from nltk.tokenize import word_tokenize
+from nltk.corpus import stopwords
+
+# Download required NLTK data
+nltk.download('punkt')
+nltk.download('stopwords')
+
+# Load spaCy model
+nlp = spacy.load('en_core_web_sm')
 
 load_dotenv()
 
@@ -26,13 +37,12 @@ app.add_middleware(
     max_age=3600,
 )
 
-# Initialize OpenAI client
+# Initialize clients
 api_key = os.getenv("OPENAI_API_KEY")
 if not api_key:
     raise ValueError("OPENAI_API_KEY environment variable is not set")
 client = OpenAI(api_key=api_key)
 
-# Initialize Supabase client
 supabase_url = os.getenv("SUPABASE_URL")
 supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 if not supabase_url or not supabase_key:
@@ -40,6 +50,7 @@ if not supabase_url or not supabase_key:
 supabase = create_client(supabase_url, supabase_key)
 
 def extract_template_variables(doc: Document) -> Dict[str, str]:
+    """Extract content from the document while preserving structure."""
     variables = {}
     current_section = None
     section_content = []
@@ -49,6 +60,7 @@ def extract_template_variables(doc: Document) -> Dict[str, str]:
         if not text:
             continue
             
+        # Detect section headers (all caps or ending with colon)
         if text.isupper() or text.endswith(':'):
             if current_section and section_content:
                 variables[current_section] = '\n'.join(section_content)
@@ -56,6 +68,9 @@ def extract_template_variables(doc: Document) -> Dict[str, str]:
             current_section = text.lower().replace(':', '').strip()
         else:
             if current_section:
+                # Preserve bullet points and formatting
+                if paragraph.style.name.startswith('List'):
+                    text = f"• {text}"
                 section_content.append(text)
             
     if current_section and section_content:
@@ -63,33 +78,33 @@ def extract_template_variables(doc: Document) -> Dict[str, str]:
         
     return variables
 
-def clean_json_response(response_text: str) -> str:
-    """Clean and validate JSON response from OpenAI."""
-    try:
-        # Remove any leading/trailing whitespace and newlines
-        cleaned = response_text.strip()
-        
-        # Find the first { and last } to extract just the JSON object
-        start_idx = cleaned.find('{')
-        end_idx = cleaned.rfind('}')
-        
-        if start_idx == -1 or end_idx == -1:
-            print(f"Invalid JSON structure. Raw response: {response_text}")
-            raise ValueError("No valid JSON object found in response")
-            
-        cleaned = cleaned[start_idx:end_idx + 1]
-        
-        # Validate JSON structure
-        parsed = json.loads(cleaned)
-        return json.dumps(parsed)  # Normalize the JSON string
-        
-    except Exception as e:
-        print(f"JSON cleaning error. Raw response: {response_text}")
-        print(f"Error details: {str(e)}")
-        raise ValueError(f"Failed to clean JSON response: {str(e)}")
+def analyze_job_description(job_description: str) -> Dict[str, Any]:
+    """Analyze job description using NLP to extract key requirements."""
+    doc = nlp(job_description)
+    
+    # Extract key skills and requirements
+    skills = set()
+    requirements = []
+    
+    for ent in doc.ents:
+        if ent.label_ in ['ORG', 'PRODUCT', 'GPE']:
+            skills.add(ent.text.lower())
+    
+    for token in doc:
+        if token.pos_ in ['NOUN', 'PROPN'] and len(token.text) > 2:
+            skills.add(token.text.lower())
+    
+    return {
+        'skills': list(skills),
+        'requirements': requirements
+    }
 
 def optimize_resume_content(template_vars: Dict[str, str], job_description: str) -> Dict[str, str]:
+    """Optimize resume content while preserving format."""
     try:
+        # Analyze job description
+        job_analysis = analyze_job_description(job_description)
+        
         system_prompt = """You are an expert ATS resume optimizer. Your task is to optimize the resume content while maintaining the exact format:
         1. Return ONLY a valid JSON object with the same keys as input
         2. For each section:
@@ -105,10 +120,10 @@ def optimize_resume_content(template_vars: Dict[str, str], job_description: str)
         Return only the JSON object, nothing else."""
 
         response = client.chat.completions.create(
-            model="gpt-4",
+            model="gpt-4o",
             messages=[
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"Original Resume:\n{json.dumps(template_vars)}\n\nJob Description:\n{job_description}"}
+                {"role": "user", "content": f"Original Resume:\n{json.dumps(template_vars)}\n\nJob Description:\n{job_description}\n\nKey Skills Required:\n{', '.join(job_analysis['skills'])}"}
             ],
             temperature=0.7
         )
@@ -118,21 +133,14 @@ def optimize_resume_content(template_vars: Dict[str, str], job_description: str)
             raise ValueError("Empty response from OpenAI")
             
         print(f"Raw OpenAI response: {response_content}")
-        cleaned_json = clean_json_response(response_content)
-        optimized_content = json.loads(cleaned_json)
+        optimized_content = json.loads(response_content)
         
         # Verify structure preservation
         for key in template_vars.keys():
             if key not in optimized_content:
                 print(f"Missing key in optimization: {key}")
                 optimized_content[key] = template_vars[key]
-            else:
-                orig_lines = template_vars[key].split('\n')
-                opt_lines = optimized_content[key].split('\n')
-                if len(orig_lines) != len(opt_lines):
-                    print(f"Line count mismatch in section {key}")
-                    optimized_content[key] = template_vars[key]
-                    
+                
         return optimized_content
             
     except Exception as e:
@@ -152,9 +160,11 @@ async def process_resume(
         doc = Document(BytesIO(content))
         template_doc = DocxTemplate(BytesIO(content))
         
+        # Extract and optimize content
         template_vars = extract_template_variables(doc)
         optimized_vars = optimize_resume_content(template_vars, job_description)
         
+        # Render optimized content while preserving formatting
         template_doc.render(optimized_vars)
         
         output = BytesIO()
