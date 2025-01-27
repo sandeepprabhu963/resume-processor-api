@@ -15,14 +15,15 @@ from supabase import create_client
 
 load_dotenv()
 
-app = FastAPI()
+app = FastAPI(title="Resume Optimizer API")
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
+    max_age=3600,
 )
 
 # Initialize OpenAI client
@@ -38,26 +39,7 @@ if not supabase_url or not supabase_key:
     raise ValueError("Supabase environment variables are not properly set")
 supabase = create_client(supabase_url, supabase_key)
 
-def analyze_text(text: str) -> Dict[str, Any]:
-    """Analyze text using regex patterns for keyword extraction."""
-    # Clean and tokenize text
-    words = re.findall(r'\b\w+\b', text.lower())
-    
-    # Define common technical skills pattern
-    skills_pattern = r'\b(?:Python|Java|SQL|AWS|Azure|GCP|Docker|Kubernetes|React|Angular|Vue|Node\.js|JavaScript|TypeScript|C\+\+|Ruby|PHP|HTML|CSS|REST|API|ML|AI|DevOps|CI/CD|Git|Agile|Scrum)\b'
-    technical_skills = list(set(re.findall(skills_pattern, text, re.IGNORECASE)))
-    
-    # Get unique words (excluding very common words)
-    common_words = {'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by'}
-    keywords = [word for word in set(words) if word not in common_words]
-    
-    return {
-        'keywords': keywords[:50],  # Limit to top 50 keywords
-        'technical_skills': technical_skills
-    }
-
 def extract_template_variables(doc: Document) -> Dict[str, str]:
-    """Extract content from the document while preserving structure."""
     variables = {}
     current_section = None
     section_content = []
@@ -81,12 +63,28 @@ def extract_template_variables(doc: Document) -> Dict[str, str]:
         
     return variables
 
-def optimize_resume_content(template_vars: Dict[str, str], job_description: str) -> Dict[str, str]:
-    """Optimize resume content while preserving format."""
+def clean_json_response(response_text: str) -> str:
     try:
-        job_analysis = analyze_text(job_description)
+        cleaned = response_text.strip()
+        start_idx = cleaned.find('{')
+        end_idx = cleaned.rfind('}')
         
-        system_prompt = """You are an expert ATS resume optimizer. Optimize the resume content while maintaining format:
+        if start_idx == -1 or end_idx == -1:
+            print(f"Invalid JSON structure. Raw response: {response_text}")
+            raise ValueError("No valid JSON object found in response")
+            
+        cleaned = cleaned[start_idx:end_idx + 1]
+        parsed = json.loads(cleaned)
+        return json.dumps(parsed)
+        
+    except Exception as e:
+        print(f"JSON cleaning error. Raw response: {response_text}")
+        print(f"Error details: {str(e)}")
+        raise ValueError(f"Failed to clean JSON response: {str(e)}")
+
+def optimize_resume_content(template_vars: Dict[str, str], job_description: str) -> Dict[str, str]:
+    try:
+        system_prompt = """You are an expert ATS resume optimizer. Your task is to optimize the resume content while maintaining the exact format:
         1. Return ONLY a valid JSON object with the same keys as input
         2. For each section:
            - Keep exact format (bullets, spacing)
@@ -97,18 +95,36 @@ def optimize_resume_content(template_vars: Dict[str, str], job_description: str)
            - Keep same number of lines
            - Keep dates and company names
         3. DO NOT change structure or formatting
-        4. Focus on relevant skills and natural keyword integration"""
+        4. Focus on relevant skills and natural keyword integration
+        Return only the JSON object, nothing else."""
 
         response = client.chat.completions.create(
             model="gpt-4",
             messages=[
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"Original Resume:\n{json.dumps(template_vars)}\n\nJob Description:\n{job_description}\n\nKey Skills Required:\n{', '.join(job_analysis['technical_skills'])}"}
+                {"role": "user", "content": f"Original Resume:\n{json.dumps(template_vars)}\n\nJob Description:\n{job_description}"}
             ],
             temperature=0.7
         )
         
-        optimized_content = json.loads(response.choices[0].message.content)
+        response_content = response.choices[0].message.content
+        if not response_content:
+            raise ValueError("Empty response from OpenAI")
+            
+        cleaned_json = clean_json_response(response_content)
+        optimized_content = json.loads(cleaned_json)
+        
+        for key in template_vars.keys():
+            if key not in optimized_content:
+                print(f"Missing key in optimization: {key}")
+                optimized_content[key] = template_vars[key]
+            else:
+                orig_lines = template_vars[key].split('\n')
+                opt_lines = optimized_content[key].split('\n')
+                if len(orig_lines) != len(opt_lines):
+                    print(f"Line count mismatch in section {key}")
+                    optimized_content[key] = template_vars[key]
+                    
         return optimized_content
             
     except Exception as e:
@@ -121,6 +137,9 @@ async def process_resume(
     job_description: str = Form(...)
 ):
     try:
+        print(f"Processing resume: {file.filename}")
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        
         content = await file.read()
         doc = Document(BytesIO(content))
         template_doc = DocxTemplate(BytesIO(content))
@@ -134,16 +153,25 @@ async def process_resume(
         template_doc.save(output)
         output.seek(0)
         
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        # Store in Supabase
         filename = re.sub(r'[^\w\-\.]', '_', file.filename).strip('_').strip()
         
         try:
+            # Upload original resume
             original_path = f"original_{timestamp}_{filename}"
+            supabase.storage.from_("resume_templates").upload(
+                original_path,
+                content
+            )
+            
+            # Upload optimized resume
             optimized_path = f"optimized_{timestamp}_{filename}"
+            supabase.storage.from_("resume_templates").upload(
+                optimized_path,
+                output.getvalue()
+            )
             
-            supabase.storage.from_("resume_templates").upload(original_path, content)
-            supabase.storage.from_("resume_templates").upload(optimized_path, output.getvalue())
-            
+            # Store optimization record
             supabase.table('resume_optimizations').insert({
                 'original_resume_path': original_path,
                 'optimized_resume_path': optimized_path,
@@ -160,13 +188,23 @@ async def process_resume(
             media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             headers={
                 "Content-Disposition": f"attachment; filename=optimized_{filename}",
-                "Access-Control-Expose-Headers": "Content-Disposition"
+                "Access-Control-Expose-Headers": "Content-Disposition",
+                "Access-Control-Allow-Origin": "*"
             }
         )
         
     except Exception as e:
         print(f"Processing error: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.options("/process-resume/")
+async def options_process_resume():
+    return {
+        "allow": "POST,OPTIONS",
+        "content-type": "multipart/form-data",
+        "access-control-allow-headers": "Content-Type,Authorization",
+        "access-control-allow-origin": "*"
+    }
 
 @app.get("/health")
 async def health_check():
