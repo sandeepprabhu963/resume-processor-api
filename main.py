@@ -12,7 +12,6 @@ from dotenv import load_dotenv
 from datetime import datetime
 import re
 from supabase import create_client
-from pydantic import BaseModel
 
 load_dotenv()
 
@@ -40,10 +39,11 @@ if not supabase_url or not supabase_key:
     raise ValueError("Supabase environment variables are not properly set")
 supabase = create_client(supabase_url, supabase_key)
 
-def extract_template_variables(doc: Document) -> Dict[str, str]:
+def docx_to_json(doc: Document) -> Dict[str, str]:
+    """Convert DOCX document to JSON format."""
     try:
-        print("Starting template variable extraction...")
-        variables = {}
+        print("Converting DOCX to JSON...")
+        json_data = {}
         current_section = None
         section_content = []
         
@@ -52,36 +52,34 @@ def extract_template_variables(doc: Document) -> Dict[str, str]:
             if not text:
                 continue
                 
-            # Check if this is a section header
+            # Identify section headers
             if text.isupper() or text.endswith(':'):
                 if current_section and section_content:
-                    variables[current_section] = '\n'.join(section_content)
+                    json_data[current_section] = '\n'.join(section_content)
                     section_content = []
                 current_section = text.lower().replace(':', '').strip()
             else:
                 if current_section:
                     section_content.append(text)
-                
-        # Add the last section if it exists
+        
+        # Add the last section
         if current_section and section_content:
-            variables[current_section] = '\n'.join(section_content)
+            json_data[current_section] = '\n'.join(section_content)
             
-        print("Extracted variables:", json.dumps(variables, indent=2))
-        return variables
+        print("Successfully converted DOCX to JSON")
+        return json_data
     except Exception as e:
-        print(f"Error in extract_template_variables: {str(e)}")
+        print(f"Error in docx_to_json: {str(e)}")
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to process resume template: {str(e)}"
+            detail=f"Failed to convert resume to JSON: {str(e)}"
         )
 
-def optimize_resume_content(template_vars: Dict[str, str], job_description: str) -> Dict[str, str]:
+def optimize_with_gemini(json_data: Dict[str, str], job_description: str) -> Dict[str, str]:
+    """Optimize resume content using Gemini AI."""
     try:
-        print("Starting resume optimization...")
-        print("Template variables:", json.dumps(template_vars, indent=2))
-        print("Job description:", job_description)
+        print("Starting Gemini optimization...")
         
-        # Construct a more specific prompt for Gemini
         system_prompt = """You are an expert ATS resume optimizer. Analyze the resume content and job description, then return an optimized version that:
         1. Maintains the exact same structure and format as the input resume
         2. Integrates relevant keywords from the job description naturally
@@ -90,72 +88,65 @@ def optimize_resume_content(template_vars: Dict[str, str], job_description: str)
         5. Includes metrics where possible
         6. Preserves all dates and company names
         
-        Return ONLY a valid JSON object with the exact same keys as the input resume, containing the optimized content.
-        Do not add or remove any sections."""
+        Return ONLY a valid JSON object with the exact same keys as the input resume, containing the optimized content."""
 
-        # Validate input data
-        if not template_vars or not job_description:
-            raise ValueError("Missing required input data")
+        prompt = f"""
+        {system_prompt}
 
-        try:
-            print("Making Gemini API call...")
-            model = genai.GenerativeModel('gemini-pro')
-            
-            # Create a more structured prompt
-            prompt = f"""
-            {system_prompt}
+        Original Resume Content:
+        {json.dumps(json_data, ensure_ascii=False, indent=2)}
 
-            Original Resume Content:
-            {json.dumps(template_vars, ensure_ascii=False, indent=2)}
+        Job Description:
+        {job_description}
 
-            Job Description:
-            {job_description}
-
-            Please optimize the resume content while maintaining the exact same JSON structure.
-            """
+        Please optimize the resume content while maintaining the exact same JSON structure.
+        """
+        
+        model = genai.GenerativeModel('gemini-pro')
+        response = model.generate_content(prompt)
+        
+        if not response.text:
+            raise ValueError("Empty response from Gemini API")
+        
+        # Extract JSON from response
+        json_str = response.text
+        if '```json' in json_str:
+            json_str = json_str.split('```json')[1].split('```')[0]
+        elif '```' in json_str:
+            json_str = json_str.split('```')[1].split('```')[0]
+        
+        optimized_content = json.loads(json_str.strip())
+        
+        # Verify structure matches
+        if set(json_data.keys()) != set(optimized_content.keys()):
+            raise ValueError("Optimized content structure doesn't match original")
             
-            response = model.generate_content(prompt)
-            print("Gemini API response received")
-            print("Raw response:", response.text)
-            
-            if not response.text:
-                raise ValueError("Empty response from Gemini API")
-            
-            # Extract JSON from response
-            try:
-                # Find JSON content within the response
-                json_str = response.text
-                if '```json' in json_str:
-                    json_str = json_str.split('```json')[1].split('```')[0]
-                elif '```' in json_str:
-                    json_str = json_str.split('```')[1].split('```')[0]
-                
-                optimized_content = json.loads(json_str.strip())
-                if not isinstance(optimized_content, dict):
-                    raise ValueError("Response is not a valid JSON object")
-                
-                # Verify all original keys are present
-                missing_keys = set(template_vars.keys()) - set(optimized_content.keys())
-                if missing_keys:
-                    raise ValueError(f"Missing keys in optimized content: {missing_keys}")
-                
-                print("Successfully parsed optimized content")
-                return optimized_content
-                
-            except json.JSONDecodeError as e:
-                print(f"JSON parsing error: {str(e)}")
-                print(f"Failed to parse content: {response.text}")
-                raise ValueError(f"Failed to parse Gemini response: {str(e)}")
-                
-        except Exception as api_error:
-            print(f"Gemini API error: {str(api_error)}")
-            raise ValueError(f"Gemini API error: {str(api_error)}")
-            
+        return optimized_content
+        
     except Exception as e:
-        print(f"Optimization error: {str(e)}")
+        print(f"Gemini optimization error: {str(e)}")
         raise HTTPException(
             status_code=500,
             detail=f"Failed to optimize resume content: {str(e)}"
+        )
+
+def json_to_docx(template_doc: DocxTemplate, json_data: Dict[str, str]) -> BytesIO:
+    """Convert JSON back to DOCX format."""
+    try:
+        print("Converting JSON back to DOCX...")
+        template_doc.render(json_data)
+        
+        output = BytesIO()
+        template_doc.save(output)
+        output.seek(0)
+        
+        print("Successfully converted JSON to DOCX")
+        return output
+    except Exception as e:
+        print(f"Error in json_to_docx: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to convert to DOCX: {str(e)}"
         )
 
 @app.post("/process-resume/")
@@ -173,66 +164,59 @@ async def process_resume(
         print(f"Processing resume: {file.filename}")
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         
-        try:
-            content = await file.read()
-            if len(content) == 0:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Empty file uploaded. Please try again with a valid document."
-                )
-            
-            doc = Document(BytesIO(content))
-            template_doc = DocxTemplate(BytesIO(content))
-        except Exception as e:
-            print(f"Document processing error: {str(e)}")
+        # Read and process the document
+        content = await file.read()
+        if len(content) == 0:
             raise HTTPException(
                 status_code=400,
-                detail=f"Failed to read document: {str(e)}"
+                detail="Empty file uploaded"
             )
         
-        # Extract and optimize content
-        template_vars = extract_template_variables(doc)
-        optimized_vars = optimize_resume_content(template_vars, job_description)
+        # Create Document objects
+        doc = Document(BytesIO(content))
+        template_doc = DocxTemplate(BytesIO(content))
         
-        # Render optimized content
-        template_doc.render(optimized_vars)
+        # Step 1: Convert DOCX to JSON
+        json_data = docx_to_json(doc)
         
-        output = BytesIO()
-        template_doc.save(output)
-        output.seek(0)
-        
-        # Store in Supabase
+        # Step 2: Save original JSON and job description to Supabase
         filename = re.sub(r'[^\w\-\.]', '_', file.filename).strip('_').strip()
+        original_json_path = f"original_{timestamp}_{filename}.json"
         
         try:
-            # Store original and optimized content
-            original_path = f"original_{timestamp}_{filename}"
-            optimized_path = f"optimized_{timestamp}_{filename}"
-            
-            # Upload files to Supabase storage
             supabase.storage.from_("resume_templates").upload(
-                original_path,
-                content
+                original_json_path,
+                json.dumps(json_data, ensure_ascii=False, indent=2).encode('utf-8')
             )
-            
+        except Exception as e:
+            print(f"Error saving original JSON: {str(e)}")
+        
+        # Step 3: Optimize JSON using Gemini
+        optimized_json = optimize_with_gemini(json_data, job_description)
+        optimized_json_path = f"optimized_{timestamp}_{filename}.json"
+        
+        try:
             supabase.storage.from_("resume_templates").upload(
-                optimized_path,
-                output.getvalue()
+                optimized_json_path,
+                json.dumps(optimized_json, ensure_ascii=False, indent=2).encode('utf-8')
             )
-            
-            # Store optimization record
+        except Exception as e:
+            print(f"Error saving optimized JSON: {str(e)}")
+        
+        # Step 4: Convert optimized JSON back to DOCX
+        output = json_to_docx(template_doc, optimized_json)
+        
+        # Store optimization record
+        try:
             supabase.table('resume_optimizations').insert({
-                'original_resume_path': original_path,
-                'optimized_resume_path': optimized_path,
+                'original_resume_path': original_json_path,
+                'optimized_resume_path': optimized_json_path,
                 'job_description': job_description,
                 'status': 'completed'
             }).execute()
-            
         except Exception as e:
-            print(f"Storage error: {str(e)}")
-            # Continue even if storage fails
+            print(f"Error storing optimization record: {str(e)}")
         
-        output.seek(0)
         return StreamingResponse(
             output,
             media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
