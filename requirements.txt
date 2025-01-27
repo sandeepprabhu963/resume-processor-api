@@ -1,10 +1,10 @@
-fastapi==0.97.0
+fastapi==0.104.1
 uvicorn[standard]==0.22.0
 python-multipart==0.0.6
 python-docx==0.8.11
 docxtpl==0.16.7
 openai==1.6.1
 python-dotenv==1.0.0
-pydantic==1.10.13
+pydantic==2.5.2
 httpx>=0.24.1,<0.26.0
 supabase==1.2.0
