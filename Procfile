@@ -1,1 +1,1 @@
-web: pip install --no-cache-dir --upgrade pip setuptools wheel && pip install --no-cache-dir -r requirements.txt && python -m spacy download en_core_web_sm && python -m nltk.downloader punkt stopwords averaged_perceptron_tagger && uvicorn main:app --host 0.0.0.0 --port $PORT
+web: pip install --no-cache-dir -U pip && pip install --no-cache-dir wheel setuptools && pip install --no-cache-dir -r requirements.txt && python -m spacy download en_core_web_sm && python -m nltk.downloader punkt stopwords averaged_perceptron_tagger && uvicorn main:app --host 0.0.0.0 --port $PORT
