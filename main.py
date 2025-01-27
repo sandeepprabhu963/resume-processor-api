@@ -56,12 +56,12 @@ def extract_template_variables(doc: Document) -> Dict[str, str]:
     variables = {}
     current_section = None
     section_content = []
-    
+
     for paragraph in doc.paragraphs:
         text = paragraph.text.strip()
         if not text:
             continue
-            
+
         # Check if this is a section header (all caps or ends with colon)
         if text.isupper() or text.endswith(':'):
             # Save previous section if exists
@@ -73,18 +73,18 @@ def extract_template_variables(doc: Document) -> Dict[str, str]:
             if current_section:
                 # Preserve formatting by keeping original paragraph text
                 section_content.append(text)
-            
+
     # Add the last section if exists
     if current_section and section_content:
         variables[current_section] = '\n'.join(section_content)
-        
+
     return variables
 
 def optimize_resume_content(template_vars: Dict[str, str], job_description: str) -> Dict[str, str]:
     """Optimize resume content while preserving structure."""
     try:
         system_prompt = """You are an expert ATS resume optimizer. Your task is to optimize the resume content while EXACTLY maintaining the original format and structure. Follow these requirements:
-
+        system_prompt = """You are an expert ATS resume optimizer. Your task is to optimize the resume content while maintaining the EXACT format and structure. Follow these strict requirements:
 1. Return ONLY a valid JSON object with the exact same keys as the input
 2. For each section:
    - Keep the exact same format, including line breaks and spacing
@@ -95,21 +95,40 @@ def optimize_resume_content(template_vars: Dict[str, str], job_description: str)
      * Using strong action verbs
    - Maintain the same number of bullet points/paragraphs
    - Keep dates, company names, and education details unchanged
+   - Keep the exact same format, including line breaks and bullet points
+   - Optimize content by:
+     * Incorporating relevant keywords from the job description naturally
+     * Using industry-standard terminology that matches the job requirements
+     * Adding specific, quantifiable achievements where possible
+     * Using strong action verbs that demonstrate impact
+     * Highlighting skills and experiences that align with the job
+   - Maintain the exact same number of lines and bullet points
+   - Keep all dates, company names, and education details unchanged
 3. DO NOT:
    - Add new sections
    - Remove existing sections
    - Change section titles
    - Alter the document structure
+   - Add or remove any sections
+   - Change section titles or structure
+   - Modify formatting or layout
 4. Focus on:
    - Matching skills and experiences to job requirements
    - Highlighting relevant achievements
    - Using keywords from the job description naturally
    - Maintaining readability and flow
-
+   - Making each bullet point more impactful and relevant to the job
+   - Using keywords from the job description in a natural, contextual way
+   - Highlighting transferable skills that match the job requirements
+   - Maintaining professional tone and clarity
 The response must be a clean JSON object without any markdown formatting."""
+The response must be a clean JSON object without any markdown formatting or additional text."""
 
         print("Template variables:", json.dumps(template_vars, indent=2))
         print("Job description:", job_description)
+        print("Processing resume optimization with:")
+        print("Job Description:", job_description)
+        print("Original Template Variables:", json.dumps(template_vars, indent=2))
 
         response = client.chat.completions.create(
             model="gpt-4o",
@@ -121,22 +140,22 @@ The response must be a clean JSON object without any markdown formatting."""
                 {
                     "role": "user",
                     "content": f"""Original Resume Sections:
+                    "content": f"""Original Resume Content:
 {json.dumps(template_vars, indent=2)}
-
 Job Description:
 {job_description}
-
 Return only a JSON object with the optimized content for each section while maintaining exact formatting."""
+Optimize each section while maintaining exact formatting and structure. Return only a JSON object."""
                 }
             ],
             temperature=0.7,
             max_tokens=2500
         )
-        
+
         # Get the response content
         optimized_content = response.choices[0].message.content
         print(f"Raw OpenAI response: {optimized_content}")
-        
+
         # Clean and parse the JSON response
         try:
             # Remove any markdown formatting
@@ -146,18 +165,26 @@ Return only a JSON object with the optimized content for each section while main
             if cleaned_content.endswith('```'):
                 cleaned_content = cleaned_content[:-3]
             cleaned_content = cleaned_content.strip()
-            
+
             # Parse the JSON
             parsed_content = json.loads(cleaned_content)
-            
+
             # Verify all original sections are present
+            # Verify all original sections are present and properly formatted
             for key in template_vars.keys():
                 if key not in parsed_content:
                     print(f"Missing section {key} in optimized content, using original")
                     parsed_content[key] = template_vars[key]
-                    
+                else:
+                    # Ensure the optimized content maintains the same basic structure
+                    orig_lines = template_vars[key].split('\n')
+                    opt_lines = parsed_content[key].split('\n')
+                    if len(orig_lines) != len(opt_lines):
+                        print(f"Section {key} has different number of lines, using original")
+                        parsed_content[key] = template_vars[key]
+
             return parsed_content
-            
+
         except json.JSONDecodeError as e:
             print(f"JSON parsing error: {str(e)}")
             print(f"Content causing error: {cleaned_content}")
@@ -165,7 +192,7 @@ Return only a JSON object with the optimized content for each section while main
                 status_code=500,
                 detail=f"Failed to parse optimization result: {str(e)}\nContent: {cleaned_content}"
             )
-            
+
     except Exception as e:
         print(f"OpenAI optimization error: {str(e)}")
         raise HTTPException(
@@ -181,31 +208,31 @@ async def process_resume(
     try:
         print(f"Processing resume: {file.filename}")
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        
+
         # Read the document
         content = await file.read()
         doc = Document(BytesIO(content))
         template_doc = DocxTemplate(BytesIO(content))
-        
+
         # Extract template variables and their content
         template_vars = extract_template_variables(doc)
         print(f"Extracted template variables: {json.dumps(template_vars, indent=2)}")
-        
+
         # Optimize content while preserving structure
         optimized_vars = optimize_resume_content(template_vars, job_description)
         print(f"Optimized variables: {json.dumps(optimized_vars, indent=2)}")
-        
+
         # Render template with optimized content
         template_doc.render(optimized_vars)
-        
+
         # Save optimized document
         output = BytesIO()
         template_doc.save(output)
         output.seek(0)
-        
+
         # Store files in Supabase
         sanitized_filename = re.sub(r'[^\w\-\.]', '_', file.filename).strip('_').strip()
-        
+
         try:
             # Store original and optimized resumes
             supabase.storage.from_("resume_templates").upload(
@@ -223,7 +250,7 @@ async def process_resume(
         except Exception as e:
             print(f"Storage error: {str(e)}")
             # Continue processing even if storage fails
-        
+
         # Return optimized document
         output.seek(0)
         return StreamingResponse(
@@ -235,7 +262,7 @@ async def process_resume(
                 "Access-Control-Allow-Origin": "*"
             }
         )
-        
+
     except Exception as e:
         print(f"Error processing resume: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
