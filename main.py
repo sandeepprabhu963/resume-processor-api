@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 from datetime import datetime
 import re
 from supabase import create_client
+from pydantic import BaseModel
 
 load_dotenv()
 
@@ -38,6 +39,11 @@ supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 if not supabase_url or not supabase_key:
     raise ValueError("Supabase environment variables are not properly set")
 supabase = create_client(supabase_url, supabase_key)
+
+class ResumeResponse(BaseModel):
+    filename: str
+    content_type: str
+    content: bytes
 
 def extract_template_variables(doc: Document) -> Dict[str, str]:
     variables = {}
@@ -109,7 +115,7 @@ def optimize_resume_content(template_vars: Dict[str, str], job_description: str)
 async def process_resume(
     file: UploadFile = File(...),
     job_description: str = Form(...)
-):
+) -> StreamingResponse:
     try:
         print(f"Processing resume: {file.filename}")
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
