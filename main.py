@@ -62,14 +62,16 @@ def extract_template_variables(doc: Document) -> Dict[str, str]:
         if not text:
             continue
             
-        # Check if this is a section header
+        # Check if this is a section header (all caps or ends with colon)
         if text.isupper() or text.endswith(':'):
+            # Save previous section if exists
             if current_section and section_content:
                 variables[current_section] = '\n'.join(section_content)
                 section_content = []
             current_section = text.lower().replace(':', '').strip()
         else:
             if current_section:
+                # Preserve formatting by keeping original paragraph text
                 section_content.append(text)
             
     # Add the last section if exists
@@ -81,31 +83,33 @@ def extract_template_variables(doc: Document) -> Dict[str, str]:
 def optimize_resume_content(template_vars: Dict[str, str], job_description: str) -> Dict[str, str]:
     """Optimize resume content while preserving structure."""
     try:
-        system_prompt = """You are an expert ATS resume optimizer. Your task is to optimize the resume content while strictly maintaining the original format and structure. Follow these requirements:
+        system_prompt = """You are an expert ATS resume optimizer. Your task is to optimize the resume content while EXACTLY maintaining the original format and structure. Follow these requirements:
 
 1. Return ONLY a valid JSON object with the exact same keys as the input
 2. For each section:
-   - Keep the same format and style
-   - Optimize content to match job requirements
-   - Include relevant keywords from the job description
-   - Use industry-specific terminology
-   - Add quantifiable achievements where possible
-   - Use strong action verbs
+   - Keep the exact same format, including line breaks and spacing
+   - Optimize content to match job requirements by:
+     * Including relevant keywords from the job description
+     * Using industry-specific terminology
+     * Adding quantifiable achievements where possible
+     * Using strong action verbs
+   - Maintain the same number of bullet points/paragraphs
+   - Keep dates, company names, and education details unchanged
 3. DO NOT:
    - Add new sections
    - Remove existing sections
    - Change section titles
-   - Modify dates or company names
-   - Change education details
-4. Ensure the response is a clean JSON object without markdown formatting
+   - Alter the document structure
+4. Focus on:
+   - Matching skills and experiences to job requirements
+   - Highlighting relevant achievements
+   - Using keywords from the job description naturally
+   - Maintaining readability and flow
 
-Example format:
-{
-    "summary": "Optimized summary...",
-    "experience": "Optimized experience keeping same structure...",
-    "education": "Exactly same education details...",
-    "skills": "Enhanced skills list..."
-}"""
+The response must be a clean JSON object without any markdown formatting."""
+
+        print("Template variables:", json.dumps(template_vars, indent=2))
+        print("Job description:", job_description)
 
         response = client.chat.completions.create(
             model="gpt-4o",
@@ -122,7 +126,7 @@ Example format:
 Job Description:
 {job_description}
 
-Return only a JSON object with the optimized content for each section."""
+Return only a JSON object with the optimized content for each section while maintaining exact formatting."""
                 }
             ],
             temperature=0.7,
@@ -149,6 +153,7 @@ Return only a JSON object with the optimized content for each section."""
             # Verify all original sections are present
             for key in template_vars.keys():
                 if key not in parsed_content:
+                    print(f"Missing section {key} in optimized content, using original")
                     parsed_content[key] = template_vars[key]
                     
             return parsed_content
