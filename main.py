@@ -52,7 +52,7 @@ def docx_to_json(doc: Document) -> Dict[str, str]:
             if not text:
                 continue
                 
-            # Identify section headers
+            # Identify section headers (all caps or ends with colon)
             if text.isupper() or text.endswith(':'):
                 if current_section and section_content:
                     json_data[current_section] = '\n'.join(section_content)
@@ -60,6 +60,9 @@ def docx_to_json(doc: Document) -> Dict[str, str]:
                 current_section = text.lower().replace(':', '').strip()
             else:
                 if current_section:
+                    section_content.append(text)
+                elif not current_section and text:  # Handle content before first section
+                    current_section = "header"
                     section_content.append(text)
         
         # Add the last section
@@ -87,8 +90,10 @@ def optimize_with_gemini(json_data: Dict[str, str], job_description: str) -> Dic
         4. Uses strong action verbs
         5. Includes metrics where possible
         6. Preserves all dates and company names
+        7. Keeps the same sections in the same order
         
-        Return ONLY a valid JSON object with the exact same keys as the input resume, containing the optimized content."""
+        Return ONLY a valid JSON object with the exact same keys as the input resume, containing the optimized content.
+        Do not add or remove any sections."""
 
         prompt = f"""
         {system_prompt}
@@ -179,34 +184,54 @@ async def process_resume(
         # Step 1: Convert DOCX to JSON
         json_data = docx_to_json(doc)
         
-        # Step 2: Save original JSON and job description to Supabase
+        # Step 2: Save original JSON to Supabase storage
         filename = re.sub(r'[^\w\-\.]', '_', file.filename).strip('_').strip()
         original_json_path = f"original_{timestamp}_{filename}.json"
         
         try:
+            # Convert JSON to string and encode to bytes
+            json_str = json.dumps(json_data, ensure_ascii=False, indent=2)
+            json_bytes = json_str.encode('utf-8')
+            
+            # Upload to Supabase storage
             supabase.storage.from_("resume_templates").upload(
                 original_json_path,
-                json.dumps(json_data, ensure_ascii=False, indent=2).encode('utf-8')
+                json_bytes
             )
+            print(f"Original JSON saved to: {original_json_path}")
         except Exception as e:
             print(f"Error saving original JSON: {str(e)}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to save original JSON: {str(e)}"
+            )
         
         # Step 3: Optimize JSON using Gemini
         optimized_json = optimize_with_gemini(json_data, job_description)
         optimized_json_path = f"optimized_{timestamp}_{filename}.json"
         
         try:
+            # Convert optimized JSON to string and encode to bytes
+            optimized_json_str = json.dumps(optimized_json, ensure_ascii=False, indent=2)
+            optimized_json_bytes = optimized_json_str.encode('utf-8')
+            
+            # Upload optimized JSON to Supabase storage
             supabase.storage.from_("resume_templates").upload(
                 optimized_json_path,
-                json.dumps(optimized_json, ensure_ascii=False, indent=2).encode('utf-8')
+                optimized_json_bytes
             )
+            print(f"Optimized JSON saved to: {optimized_json_path}")
         except Exception as e:
             print(f"Error saving optimized JSON: {str(e)}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to save optimized JSON: {str(e)}"
+            )
         
         # Step 4: Convert optimized JSON back to DOCX
         output = json_to_docx(template_doc, optimized_json)
         
-        # Store optimization record
+        # Store optimization record in database
         try:
             supabase.table('resume_optimizations').insert({
                 'original_resume_path': original_json_path,
@@ -214,8 +239,10 @@ async def process_resume(
                 'job_description': job_description,
                 'status': 'completed'
             }).execute()
+            print("Optimization record stored in database")
         except Exception as e:
             print(f"Error storing optimization record: {str(e)}")
+            # Continue even if record storage fails
         
         return StreamingResponse(
             output,
