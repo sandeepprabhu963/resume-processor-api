@@ -2,12 +2,14 @@ from fastapi import FastAPI, File, UploadFile, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
 from docx import Document
+from docx.shared import Pt, RGBColor, Inches
+from docx.enum.text import WD_PARAGRAPH_ALIGNMENT
 from docxtpl import DocxTemplate
 import google.generativeai as genai
 import json
 import os
 from io import BytesIO
-from typing import Dict, Any
+from typing import Dict, Any, List
 from dotenv import load_dotenv
 from datetime import datetime
 import re
@@ -27,7 +29,7 @@ app.add_middleware(
     expose_headers=["Content-Disposition"],
 )
 
-# Initialize API clients and configurations
+# Initialize API clients
 api_key = os.getenv("GEMINI_API_KEY")
 if not api_key:
     raise ValueError("GEMINI_API_KEY environment variable is not set")
@@ -39,10 +41,48 @@ if not supabase_url or not supabase_key:
     raise ValueError("Supabase environment variables are not properly set")
 supabase = create_client(supabase_url, supabase_key)
 
-def docx_to_json(doc: Document) -> Dict[str, Any]:
-    """Convert DOCX document to JSON format with improved structure handling."""
+def format_docx(doc: Document) -> Document:
+    """Apply consistent formatting to the DOCX document."""
     try:
-        print("Starting DOCX to JSON conversion...")
+        print("Applying document formatting...")
+        
+        # Set default font and spacing
+        style = doc.styles['Normal']
+        style.font.name = 'Calibri'
+        style.font.size = Pt(11)
+        style.paragraph_format.space_after = Pt(8)
+        
+        # Format headings and content
+        for paragraph in doc.paragraphs:
+            # Detect and format section headers
+            if (paragraph.text.isupper() or 
+                paragraph.text.endswith(':') or 
+                any(header in paragraph.text.lower() for header in 
+                    ['summary', 'experience', 'education', 'skills', 'contact', 'objective'])):
+                
+                paragraph.style = doc.styles['Heading 1']
+                paragraph.runs[0].bold = True
+                paragraph.runs[0].font.size = Pt(14)
+                paragraph.paragraph_format.space_before = Pt(12)
+                paragraph.paragraph_format.space_after = Pt(4)
+                
+            # Format bullet points
+            elif paragraph.text.strip().startswith('•'):
+                paragraph.paragraph_format.left_indent = Inches(0.25)
+                paragraph.paragraph_format.first_line_indent = Inches(-0.25)
+                
+        print("Document formatting applied successfully")
+        return doc
+        
+    except Exception as e:
+        print(f"Error in format_docx: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to format document: {str(e)}")
+
+def docx_to_json(doc: Document) -> Dict[str, Any]:
+    """Convert formatted DOCX document to JSON with enhanced structure."""
+    try:
+        print("Converting DOCX to JSON...")
+        
         json_data = {
             "sections": {},
             "metadata": {
@@ -79,7 +119,7 @@ def docx_to_json(doc: Document) -> Dict[str, Any]:
                     # Preserve formatting and structure
                     para_data = {
                         "text": text,
-                        "style": "bullet" if text.startswith('•') or text.startswith('-') else "regular",
+                        "style": "bullet" if text.startswith('•') else "regular",
                         "formatting": {
                             "bold": any(run.bold for run in paragraph.runs),
                             "italic": any(run.italic for run in paragraph.runs)
@@ -109,9 +149,9 @@ def docx_to_json(doc: Document) -> Dict[str, Any]:
         raise HTTPException(status_code=500, detail=f"Failed to convert resume to JSON: {str(e)}")
 
 def json_to_docx(template_doc: DocxTemplate, json_data: Dict[str, Any]) -> BytesIO:
-    """Convert JSON back to DOCX format with improved formatting preservation."""
+    """Convert JSON back to DOCX format with enhanced formatting."""
     try:
-        print("Starting JSON to DOCX conversion...")
+        print("Converting JSON to DOCX...")
         
         # Create context for template
         context = {}
@@ -127,9 +167,8 @@ def json_to_docx(template_doc: DocxTemplate, json_data: Dict[str, Any]) -> Bytes
                     continue
                 
                 # Apply formatting
-                if item.get("style") == "bullet":
-                    if not text.startswith('•'):
-                        text = f"• {text}"
+                if item.get("style") == "bullet" and not text.startswith('•'):
+                    text = f"• {text}"
                 
                 # Handle special formatting
                 if item.get("formatting", {}).get("bold"):
@@ -150,8 +189,6 @@ def json_to_docx(template_doc: DocxTemplate, json_data: Dict[str, Any]) -> Bytes
             if bullet_points:
                 context[f"{template_var}_bullets"] = bullet_points
         
-        print("Template context prepared:", context)
-        
         # Render template
         template_doc.render(context)
         
@@ -166,78 +203,6 @@ def json_to_docx(template_doc: DocxTemplate, json_data: Dict[str, Any]) -> Bytes
     except Exception as e:
         print(f"Error in json_to_docx: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to convert to DOCX: {str(e)}")
-
-def optimize_with_gemini(json_data: Dict[str, str], job_description: str) -> Dict[str, str]:
-    """Optimize resume content using Gemini AI with enhanced error handling."""
-    try:
-        print("Starting Gemini optimization...")
-        
-        # Configure the model with safety settings
-        model = genai.GenerativeModel('gemini-pro',
-            safety_settings=[
-                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
-                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
-                {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
-                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
-            ])
-
-        system_prompt = """You are an expert ATS resume optimizer. Analyze the resume content and job description, then return an optimized version that:
-        1. Maintains the exact same structure and format as the input resume
-        2. Integrates relevant keywords from the job description naturally
-        3. Emphasizes matching skills and experiences
-        4. Uses strong action verbs
-        5. Includes metrics where possible
-        6. Preserves all dates and company names
-        7. Keeps the same sections in the same order
-        
-        Return ONLY a valid JSON object with the exact same keys as the input resume, containing the optimized content.
-        Do not include any explanations or markdown formatting."""
-
-        prompt = f"""
-        {system_prompt}
-
-        Original Resume Content:
-        {json.dumps(json_data, ensure_ascii=False, indent=2)}
-
-        Job Description:
-        {job_description}
-
-        Please optimize the resume content while maintaining the exact same JSON structure.
-        """
-        
-        # Generate content with retry mechanism
-        max_retries = 3
-        for attempt in range(max_retries):
-            try:
-                response = model.generate_content(prompt)
-                if not response.text:
-                    raise ValueError("Empty response from Gemini API")
-                
-                # Extract JSON from response
-                json_str = response.text
-                if '```json' in json_str:
-                    json_str = json_str.split('```json')[1].split('```')[0]
-                elif '```' in json_str:
-                    json_str = json_str.split('```')[1].split('```')[0]
-                
-                optimized_content = json.loads(json_str.strip())
-                
-                # Verify structure matches
-                if set(json_data.keys()) != set(optimized_content.keys()):
-                    raise ValueError("Optimized content structure doesn't match original")
-                    
-                print("Successfully optimized content with Gemini")
-                return optimized_content
-                
-            except Exception as e:
-                if attempt == max_retries - 1:
-                    raise e
-                print(f"Retry {attempt + 1}/{max_retries} after error: {str(e)}")
-                continue
-                
-    except Exception as e:
-        print(f"Gemini optimization error: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to optimize resume content: {str(e)}")
 
 @app.post("/process-resume/")
 async def process_resume(
@@ -256,11 +221,12 @@ async def process_resume(
         if len(content) == 0:
             raise HTTPException(status_code=400, detail="Empty file uploaded")
         
-        # Create Document objects
+        # Create Document objects and apply formatting
         doc = Document(BytesIO(content))
+        doc = format_docx(doc)  # Apply consistent formatting
         template_doc = DocxTemplate(BytesIO(content))
         
-        # Convert DOCX to JSON
+        # Convert formatted DOCX to JSON
         json_data = docx_to_json(doc)
         
         # Save original JSON to Supabase
@@ -281,10 +247,25 @@ async def process_resume(
             raise HTTPException(status_code=500, detail=f"Failed to save original JSON: {str(e)}")
         
         # Optimize JSON using Gemini
-        optimized_json = optimize_with_gemini(json_data, job_description)
-        optimized_json_path = f"optimized_{timestamp}_{filename}.json"
+        model = genai.GenerativeModel('gemini-pro')
+        prompt = f"""
+        Optimize this resume content for the following job description while maintaining the exact same structure:
+        
+        Resume Content:
+        {json.dumps(json_data, ensure_ascii=False, indent=2)}
+        
+        Job Description:
+        {job_description}
+        
+        Return ONLY the optimized JSON with the exact same structure.
+        """
         
         try:
+            response = model.generate_content(prompt)
+            optimized_json = json.loads(response.text)
+            
+            # Save optimized JSON
+            optimized_json_path = f"optimized_{timestamp}_{filename}.json"
             optimized_json_str = json.dumps(optimized_json, ensure_ascii=False, indent=2)
             optimized_json_bytes = optimized_json_str.encode('utf-8')
             
@@ -293,9 +274,10 @@ async def process_resume(
                 optimized_json_bytes
             )
             print(f"Optimized JSON saved to: {optimized_json_path}")
+            
         except Exception as e:
-            print(f"Error saving optimized JSON: {str(e)}")
-            raise HTTPException(status_code=500, detail=f"Failed to save optimized JSON: {str(e)}")
+            print(f"Error in optimization: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Failed to optimize resume content: {str(e)}")
         
         # Convert optimized JSON back to DOCX
         output = json_to_docx(template_doc, optimized_json)
@@ -321,8 +303,6 @@ async def process_resume(
             }
         )
         
-    except HTTPException as he:
-        raise he
     except Exception as e:
         print(f"Processing error: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
