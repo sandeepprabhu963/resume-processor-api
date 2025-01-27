@@ -26,15 +26,14 @@ except LookupError:
 
 load_dotenv()
 
-app = FastAPI(title="Resume Optimizer API")
+app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_credentials=True,
-    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_methods=["*"],
     allow_headers=["*"],
-    max_age=3600,
 )
 
 # Initialize OpenAI client
@@ -180,8 +179,7 @@ async def process_resume(
             media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             headers={
                 "Content-Disposition": f"attachment; filename=optimized_{filename}",
-                "Access-Control-Expose-Headers": "Content-Disposition",
-                "Access-Control-Allow-Origin": "*"
+                "Access-Control-Expose-Headers": "Content-Disposition"
             }
         )
         
