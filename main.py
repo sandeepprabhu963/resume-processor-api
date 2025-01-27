@@ -15,6 +15,7 @@ from datetime import datetime
 import re
 from supabase import create_client
 import traceback
+import time
 
 load_dotenv()
 
@@ -67,16 +68,12 @@ def format_docx(doc: Document) -> Document:
                 any(header in paragraph.text.lower() for header in 
                     ['summary', 'experience', 'education', 'skills', 'contact', 'objective'])):
                 
-                try:
-                    paragraph.style = doc.styles['Heading 1']
-                    for run in paragraph.runs:
-                        run.bold = True
-                        run.font.size = Pt(14)
-                    paragraph.paragraph_format.space_before = Pt(12)
-                    paragraph.paragraph_format.space_after = Pt(4)
-                except Exception as e:
-                    print(f"Warning: Failed to format header {paragraph.text}: {str(e)}")
-                    continue
+                paragraph.style = doc.styles['Heading 1']
+                for run in paragraph.runs:
+                    run.bold = True
+                    run.font.size = Pt(14)
+                paragraph.paragraph_format.space_before = Pt(12)
+                paragraph.paragraph_format.space_after = Pt(4)
                 
             # Format bullet points
             elif paragraph.text.strip().startswith('•'):
@@ -155,9 +152,6 @@ def docx_to_json(doc: Document) -> Dict[str, Any]:
                 "style": "regular"
             }
         
-        if not json_data["sections"]:
-            raise ValueError("No sections were extracted from the document")
-            
         print("DOCX to JSON conversion completed successfully")
         return json_data
         
@@ -205,27 +199,16 @@ def json_to_docx(template_doc: DocxTemplate, json_data: Dict[str, Any]) -> Bytes
                 
                 formatted_content.append(text)
             
-            # Join with proper line breaks
             context[template_var] = '\n'.join(formatted_content)
         
-        if not context:
-            raise ValueError("No content was processed for the template")
-            
-        # Render template with safety checks
-        try:
-            template_doc.render(context)
-        except Exception as template_error:
-            print(f"Template rendering error: {str(template_error)}\nContext: {json.dumps(context, indent=2)}")
-            raise
+        # Render template
+        template_doc.render(context)
         
         # Save to BytesIO
         output = BytesIO()
         template_doc.save(output)
         output.seek(0)
         
-        if output.getbuffer().nbytes == 0:
-            raise ValueError("Generated DOCX file is empty")
-            
         print("JSON to DOCX conversion completed successfully")
         return output
         
@@ -254,13 +237,9 @@ async def process_resume(
             raise HTTPException(status_code=400, detail="Empty file uploaded")
         
         # Create Document objects and apply formatting
-        try:
-            doc = Document(BytesIO(content))
-            doc = format_docx(doc)  # Apply consistent formatting
-            template_doc = DocxTemplate(BytesIO(content))
-        except Exception as e:
-            print(f"Error creating document objects: {str(e)}\n{traceback.format_exc()}")
-            raise HTTPException(status_code=500, detail="Failed to process document format")
+        doc = Document(BytesIO(content))
+        doc = format_docx(doc)  # Apply consistent formatting
+        template_doc = DocxTemplate(BytesIO(content))
         
         # Convert formatted DOCX to JSON
         json_data = docx_to_json(doc)
@@ -285,12 +264,19 @@ async def process_resume(
         # Optimize JSON using Gemini
         model = genai.GenerativeModel('gemini-pro')
         
-        # Configure safety settings
+        # Configure safety settings and generation config
         safety_settings = {
             "HARASSMENT": "block_none",
             "HATE_SPEECH": "block_none",
             "SEXUALLY_EXPLICIT": "block_none",
             "DANGEROUS_CONTENT": "block_none",
+        }
+        
+        generation_config = {
+            "temperature": 0.7,
+            "top_p": 1,
+            "top_k": 1,
+            "max_output_tokens": 2048,
         }
         
         prompt = f"""
@@ -305,53 +291,53 @@ async def process_resume(
         Return ONLY the optimized JSON with the exact same structure.
         """
         
-        try:
-            generation_config = {
-                "temperature": 0.7,
-                "top_p": 1,
-                "top_k": 1,
-                "max_output_tokens": 2048,
-            }
-            
-            response = model.generate_content(
-                prompt,
-                generation_config=generation_config,
-                safety_settings=safety_settings
-            )
-            
-            if not response.text:
-                raise ValueError("Empty response from Gemini API")
-                
-            response_text = response.text.strip()
-            print(f"Gemini API response: {response_text}")
-            
-            # Remove any markdown code block markers if present
-            response_text = re.sub(r'^```json\s*|\s*```$', '', response_text)
-            
+        # Implement retry mechanism for Gemini API
+        max_retries = 3
+        retry_delay = 1  # seconds
+        
+        for attempt in range(max_retries):
             try:
-                optimized_json = json.loads(response_text)
-            except json.JSONDecodeError as e:
-                print(f"Error parsing Gemini response: {str(e)}\nResponse text: {response_text}")
-                raise HTTPException(status_code=500, detail="Failed to parse optimized content")
-            
-            # Validate optimized JSON structure
-            if not isinstance(optimized_json, dict) or "sections" not in optimized_json:
-                raise ValueError("Invalid JSON structure in optimized content")
-            
-            # Save optimized JSON
-            optimized_json_path = f"optimized_{timestamp}_{filename}.json"
-            optimized_json_str = json.dumps(optimized_json, ensure_ascii=False, indent=2)
-            optimized_json_bytes = optimized_json_str.encode('utf-8')
-            
-            supabase.storage.from_("resume_templates").upload(
-                optimized_json_path,
-                optimized_json_bytes
-            )
-            print(f"Optimized JSON saved to: {optimized_json_path}")
-            
-        except Exception as e:
-            print(f"Error in optimization: {str(e)}\n{traceback.format_exc()}")
-            raise HTTPException(status_code=500, detail=f"Failed to optimize resume content: {str(e)}")
+                response = model.generate_content(
+                    prompt,
+                    generation_config=generation_config,
+                    safety_settings=safety_settings
+                )
+                
+                if not response.text:
+                    raise ValueError("Empty response from Gemini API")
+                    
+                response_text = response.text.strip()
+                print(f"Gemini API response (attempt {attempt + 1}): {response_text[:200]}...")
+                
+                # Remove any markdown code block markers
+                response_text = re.sub(r'^```json\s*|\s*```$', '', response_text)
+                
+                try:
+                    optimized_json = json.loads(response_text)
+                    if not isinstance(optimized_json, dict) or "sections" not in optimized_json:
+                        raise ValueError("Invalid JSON structure in optimized content")
+                    break  # Success, exit retry loop
+                except json.JSONDecodeError as e:
+                    print(f"Error parsing Gemini response: {str(e)}\nResponse text: {response_text}")
+                    if attempt == max_retries - 1:  # Last attempt
+                        raise HTTPException(status_code=500, detail="Failed to parse optimized content")
+                    
+            except Exception as e:
+                print(f"Attempt {attempt + 1} failed: {str(e)}")
+                if attempt == max_retries - 1:  # Last attempt
+                    raise HTTPException(status_code=500, detail=f"Failed to optimize resume content: {str(e)}")
+                time.sleep(retry_delay * (attempt + 1))  # Exponential backoff
+        
+        # Save optimized JSON
+        optimized_json_path = f"optimized_{timestamp}_{filename}.json"
+        optimized_json_str = json.dumps(optimized_json, ensure_ascii=False, indent=2)
+        optimized_json_bytes = optimized_json_str.encode('utf-8')
+        
+        supabase.storage.from_("resume_templates").upload(
+            optimized_json_path,
+            optimized_json_bytes
+        )
+        print(f"Optimized JSON saved to: {optimized_json_path}")
         
         # Convert optimized JSON back to DOCX
         output = json_to_docx(template_doc, optimized_json)
