@@ -10,9 +10,8 @@ from io import BytesIO
 from typing import Dict, Any
 from dotenv import load_dotenv
 from datetime import datetime
-import base64
-from supabase import create_client, Client
 import re
+from supabase import create_client
 
 load_dotenv()
 
@@ -27,18 +26,17 @@ app.add_middleware(
     max_age=3600,
 )
 
+# Initialize OpenAI client
 api_key = os.getenv("OPENAI_API_KEY")
 if not api_key:
     raise ValueError("OPENAI_API_KEY environment variable is not set")
-
 client = OpenAI(api_key=api_key)
 
+# Initialize Supabase client
 supabase_url = os.getenv("SUPABASE_URL")
 supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
-
 if not supabase_url or not supabase_key:
     raise ValueError("Supabase environment variables are not properly set")
-
 supabase = create_client(supabase_url, supabase_key)
 
 def extract_template_variables(doc: Document) -> Dict[str, str]:
@@ -65,47 +63,74 @@ def extract_template_variables(doc: Document) -> Dict[str, str]:
         
     return variables
 
+def clean_json_response(response_text: str) -> str:
+    """Clean and validate JSON response from OpenAI."""
+    try:
+        # Remove any leading/trailing whitespace and newlines
+        cleaned = response_text.strip()
+        
+        # Find the first { and last } to extract just the JSON object
+        start_idx = cleaned.find('{')
+        end_idx = cleaned.rfind('}')
+        
+        if start_idx == -1 or end_idx == -1:
+            print(f"Invalid JSON structure. Raw response: {response_text}")
+            raise ValueError("No valid JSON object found in response")
+            
+        cleaned = cleaned[start_idx:end_idx + 1]
+        
+        # Validate JSON structure
+        parsed = json.loads(cleaned)
+        return json.dumps(parsed)  # Normalize the JSON string
+        
+    except Exception as e:
+        print(f"JSON cleaning error. Raw response: {response_text}")
+        print(f"Error details: {str(e)}")
+        raise ValueError(f"Failed to clean JSON response: {str(e)}")
+
 def optimize_resume_content(template_vars: Dict[str, str], job_description: str) -> Dict[str, str]:
     try:
-        system_prompt = """You are an expert ATS resume optimizer. Optimize the resume content while maintaining the EXACT format:
-        1. Return a valid JSON object with the same keys as input
+        system_prompt = """You are an expert ATS resume optimizer. Your task is to optimize the resume content while maintaining the exact format:
+        1. Return ONLY a valid JSON object with the same keys as input
         2. For each section:
-           - Preserve exact format (line breaks, bullet points)
-           - Add relevant keywords from job description naturally
-           - Use industry-standard terminology
-           - Include quantifiable achievements
-           - Use strong action verbs
-           - Keep same number of lines/bullets
-           - Maintain all dates and company names
-        3. DO NOT change:
-           - Section structure
-           - Number of lines
-           - Formatting
-        4. Focus on:
-           - Relevant skills and experiences
-           - Natural keyword integration
-           - Professional tone
-        Return only a JSON object."""
+           - Keep exact format (bullets, spacing)
+           - Add relevant keywords from job description
+           - Use industry terms
+           - Include metrics
+           - Use action verbs
+           - Keep same number of lines
+           - Keep dates and company names
+        3. DO NOT change structure or formatting
+        4. Focus on relevant skills and natural keyword integration
+        Return only the JSON object, nothing else."""
 
         response = client.chat.completions.create(
             model="gpt-4",
             messages=[
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"Original Resume:\n{json.dumps(template_vars, indent=2)}\n\nJob Description:\n{job_description}\n\nOptimize while maintaining format. Return only JSON."}
+                {"role": "user", "content": f"Original Resume:\n{json.dumps(template_vars)}\n\nJob Description:\n{job_description}"}
             ],
             temperature=0.7
         )
         
-        optimized_content = json.loads(response.choices[0].message.content.strip())
+        response_content = response.choices[0].message.content
+        if not response_content:
+            raise ValueError("Empty response from OpenAI")
+            
+        print(f"Raw OpenAI response: {response_content}")
+        cleaned_json = clean_json_response(response_content)
+        optimized_content = json.loads(cleaned_json)
         
         # Verify structure preservation
         for key in template_vars.keys():
             if key not in optimized_content:
+                print(f"Missing key in optimization: {key}")
                 optimized_content[key] = template_vars[key]
             else:
                 orig_lines = template_vars[key].split('\n')
                 opt_lines = optimized_content[key].split('\n')
                 if len(orig_lines) != len(opt_lines):
+                    print(f"Line count mismatch in section {key}")
                     optimized_content[key] = template_vars[key]
                     
         return optimized_content
@@ -113,39 +138,6 @@ def optimize_resume_content(template_vars: Dict[str, str], job_description: str)
     except Exception as e:
         print(f"Optimization error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to optimize resume: {str(e)}")
-
-def verify_optimization(original_content: Dict[str, str], optimized_content: Dict[str, str], job_description: str) -> Dict[str, Any]:
-    try:
-        verification_prompt = f"""
-        Analyze the original resume and its optimized version for a job description.
-        Original Resume: {json.dumps(original_content)}
-        Optimized Resume: {json.dumps(optimized_content)}
-        Job Description: {job_description}
-        
-        Evaluate and return a JSON with:
-        1. optimization_score (0-100)
-        2. feedback (string explaining the changes and their effectiveness)
-        3. maintains_format (boolean)
-        """
-
-        response = client.chat.completions.create(
-            model="gpt-4",
-            messages=[
-                {"role": "system", "content": "You are an expert resume optimization analyzer."},
-                {"role": "user", "content": verification_prompt}
-            ],
-            temperature=0.7
-        )
-        
-        verification_result = json.loads(response.choices[0].message.content)
-        return verification_result
-    except Exception as e:
-        print(f"Verification error: {str(e)}")
-        return {
-            "optimization_score": 0,
-            "feedback": f"Verification failed: {str(e)}",
-            "maintains_format": False
-        }
 
 @app.post("/process-resume/")
 async def process_resume(
@@ -162,9 +154,6 @@ async def process_resume(
         
         template_vars = extract_template_variables(doc)
         optimized_vars = optimize_resume_content(template_vars, job_description)
-        
-        # Verify optimization
-        verification_result = verify_optimization(template_vars, optimized_vars, job_description)
         
         template_doc.render(optimized_vars)
         
@@ -195,8 +184,6 @@ async def process_resume(
                 'original_resume_path': original_path,
                 'optimized_resume_path': optimized_path,
                 'job_description': job_description,
-                'optimization_score': verification_result.get('optimization_score', 0),
-                'verification_feedback': verification_result.get('feedback', ''),
                 'status': 'completed'
             }).execute()
             
