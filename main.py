@@ -45,8 +45,11 @@ supabase = create_client(supabase_url, supabase_key)
 def format_docx(doc: Document) -> Document:
     """Apply consistent formatting to the DOCX document."""
     try:
-        print("Applying document formatting...")
+        print("Starting document formatting...")
         
+        if not doc.paragraphs:
+            raise ValueError("Document appears to be empty")
+            
         # Set default font and spacing
         style = doc.styles['Normal']
         style.font.name = 'Calibri'
@@ -55,25 +58,32 @@ def format_docx(doc: Document) -> Document:
         
         # Format headings and content
         for paragraph in doc.paragraphs:
+            if not paragraph.runs:
+                continue
+                
             # Detect and format section headers
             if (paragraph.text.isupper() or 
                 paragraph.text.endswith(':') or 
                 any(header in paragraph.text.lower() for header in 
                     ['summary', 'experience', 'education', 'skills', 'contact', 'objective'])):
                 
-                paragraph.style = doc.styles['Heading 1']
-                for run in paragraph.runs:
-                    run.bold = True
-                    run.font.size = Pt(14)
-                paragraph.paragraph_format.space_before = Pt(12)
-                paragraph.paragraph_format.space_after = Pt(4)
+                try:
+                    paragraph.style = doc.styles['Heading 1']
+                    for run in paragraph.runs:
+                        run.bold = True
+                        run.font.size = Pt(14)
+                    paragraph.paragraph_format.space_before = Pt(12)
+                    paragraph.paragraph_format.space_after = Pt(4)
+                except Exception as e:
+                    print(f"Warning: Failed to format header {paragraph.text}: {str(e)}")
+                    continue
                 
             # Format bullet points
             elif paragraph.text.strip().startswith('•'):
                 paragraph.paragraph_format.left_indent = Inches(0.25)
                 paragraph.paragraph_format.first_line_indent = Inches(-0.25)
-                
-        print("Document formatting applied successfully")
+        
+        print("Document formatting completed successfully")
         return doc
         
     except Exception as e:
@@ -83,7 +93,10 @@ def format_docx(doc: Document) -> Document:
 def docx_to_json(doc: Document) -> Dict[str, Any]:
     """Convert formatted DOCX document to JSON with enhanced structure."""
     try:
-        print("Converting DOCX to JSON...")
+        print("Starting DOCX to JSON conversion...")
+        
+        if not doc.paragraphs:
+            raise ValueError("Document appears to be empty")
         
         json_data = {
             "sections": {},
@@ -118,7 +131,6 @@ def docx_to_json(doc: Document) -> Dict[str, Any]:
                 
             else:
                 if current_section:
-                    # Preserve formatting and structure
                     para_data = {
                         "text": text,
                         "style": "bullet" if text.startswith('•') else "regular",
@@ -128,7 +140,7 @@ def docx_to_json(doc: Document) -> Dict[str, Any]:
                         }
                     }
                     section_content.append(para_data)
-                elif not current_section and text:
+                elif text:  # Handle text before first section
                     current_section = "header"
                     section_content.append({
                         "text": text,
@@ -143,7 +155,10 @@ def docx_to_json(doc: Document) -> Dict[str, Any]:
                 "style": "regular"
             }
         
-        print("Successfully converted DOCX to JSON")
+        if not json_data["sections"]:
+            raise ValueError("No sections were extracted from the document")
+            
+        print("DOCX to JSON conversion completed successfully")
         return json_data
         
     except Exception as e:
@@ -153,17 +168,27 @@ def docx_to_json(doc: Document) -> Dict[str, Any]:
 def json_to_docx(template_doc: DocxTemplate, json_data: Dict[str, Any]) -> BytesIO:
     """Convert JSON back to DOCX format with enhanced formatting."""
     try:
-        print("Converting JSON to DOCX...")
+        print("Starting JSON to DOCX conversion...")
+        
+        if not json_data.get("sections"):
+            raise ValueError("JSON data contains no sections")
         
         # Create context for template
         context = {}
         
         for section_name, section_data in json_data.get("sections", {}).items():
+            if not isinstance(section_data, dict) or "content" not in section_data:
+                print(f"Warning: Invalid section data for {section_name}")
+                continue
+                
             # Convert section name to valid template variable
             template_var = re.sub(r'[^\w]', '_', section_name.lower())
             
             formatted_content = []
             for item in section_data.get("content", []):
+                if not isinstance(item, dict) or "text" not in item:
+                    continue
+                    
                 text = item.get("text", "").strip()
                 if not text:
                     continue
@@ -182,24 +207,26 @@ def json_to_docx(template_doc: DocxTemplate, json_data: Dict[str, Any]) -> Bytes
             
             # Join with proper line breaks
             context[template_var] = '\n'.join(formatted_content)
-            
-            # Also provide bullet points separately
-            bullet_points = [
-                item.get("text") for item in section_data.get("content", [])
-                if item.get("style") == "bullet"
-            ]
-            if bullet_points:
-                context[f"{template_var}_bullets"] = bullet_points
         
-        # Render template
-        template_doc.render(context)
+        if not context:
+            raise ValueError("No content was processed for the template")
+            
+        # Render template with safety checks
+        try:
+            template_doc.render(context)
+        except Exception as template_error:
+            print(f"Template rendering error: {str(template_error)}\nContext: {json.dumps(context, indent=2)}")
+            raise
         
         # Save to BytesIO
         output = BytesIO()
         template_doc.save(output)
         output.seek(0)
         
-        print("Successfully converted JSON to DOCX")
+        if output.getbuffer().nbytes == 0:
+            raise ValueError("Generated DOCX file is empty")
+            
+        print("JSON to DOCX conversion completed successfully")
         return output
         
     except Exception as e:
@@ -214,6 +241,9 @@ async def process_resume(
     try:
         if not file.filename.endswith('.docx'):
             raise HTTPException(status_code=400, detail="Invalid file format. Please upload a .docx file.")
+            
+        if not job_description.strip():
+            raise HTTPException(status_code=400, detail="Job description cannot be empty")
 
         print(f"Processing resume: {file.filename}")
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -224,9 +254,13 @@ async def process_resume(
             raise HTTPException(status_code=400, detail="Empty file uploaded")
         
         # Create Document objects and apply formatting
-        doc = Document(BytesIO(content))
-        doc = format_docx(doc)  # Apply consistent formatting
-        template_doc = DocxTemplate(BytesIO(content))
+        try:
+            doc = Document(BytesIO(content))
+            doc = format_docx(doc)  # Apply consistent formatting
+            template_doc = DocxTemplate(BytesIO(content))
+        except Exception as e:
+            print(f"Error creating document objects: {str(e)}\n{traceback.format_exc()}")
+            raise HTTPException(status_code=500, detail="Failed to process document format")
         
         # Convert formatted DOCX to JSON
         json_data = docx_to_json(doc)
@@ -250,6 +284,15 @@ async def process_resume(
         
         # Optimize JSON using Gemini
         model = genai.GenerativeModel('gemini-pro')
+        
+        # Configure safety settings
+        safety_settings = {
+            "HARASSMENT": "block_none",
+            "HATE_SPEECH": "block_none",
+            "SEXUALLY_EXPLICIT": "block_none",
+            "DANGEROUS_CONTENT": "block_none",
+        }
+        
         prompt = f"""
         Optimize this resume content for the following job description while maintaining the exact same structure:
         
@@ -263,8 +306,24 @@ async def process_resume(
         """
         
         try:
-            response = model.generate_content(prompt)
+            generation_config = {
+                "temperature": 0.7,
+                "top_p": 1,
+                "top_k": 1,
+                "max_output_tokens": 2048,
+            }
+            
+            response = model.generate_content(
+                prompt,
+                generation_config=generation_config,
+                safety_settings=safety_settings
+            )
+            
+            if not response.text:
+                raise ValueError("Empty response from Gemini API")
+                
             response_text = response.text.strip()
+            print(f"Gemini API response: {response_text}")
             
             # Remove any markdown code block markers if present
             response_text = re.sub(r'^```json\s*|\s*```$', '', response_text)
@@ -274,6 +333,10 @@ async def process_resume(
             except json.JSONDecodeError as e:
                 print(f"Error parsing Gemini response: {str(e)}\nResponse text: {response_text}")
                 raise HTTPException(status_code=500, detail="Failed to parse optimized content")
+            
+            # Validate optimized JSON structure
+            if not isinstance(optimized_json, dict) or "sections" not in optimized_json:
+                raise ValueError("Invalid JSON structure in optimized content")
             
             # Save optimized JSON
             optimized_json_path = f"optimized_{timestamp}_{filename}.json"
