@@ -10,4 +10,5 @@ httpx>=0.24.1,<0.26.0
 supabase==1.2.0
 spacy==3.7.2
 nltk==3.8.1
-https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.7.1/en_core_web_sm-3.7.1.tar.gz
+# Install spacy model directly
+https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.7.1/en_core_web_sm-3.7.1-py3-none-any.whl
