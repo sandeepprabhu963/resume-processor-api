@@ -40,11 +40,6 @@ if not supabase_url or not supabase_key:
     raise ValueError("Supabase environment variables are not properly set")
 supabase = create_client(supabase_url, supabase_key)
 
-class ResumeResponse(BaseModel):
-    filename: str
-    content_type: str
-    content: bytes
-
 def extract_template_variables(doc: Document) -> Dict[str, str]:
     try:
         print("Starting template variable extraction...")
@@ -57,6 +52,7 @@ def extract_template_variables(doc: Document) -> Dict[str, str]:
             if not text:
                 continue
                 
+            # Check if this is a section header
             if text.isupper() or text.endswith(':'):
                 if current_section and section_content:
                     variables[current_section] = '\n'.join(section_content)
@@ -66,6 +62,7 @@ def extract_template_variables(doc: Document) -> Dict[str, str]:
                 if current_section:
                     section_content.append(text)
                 
+        # Add the last section if it exists
         if current_section and section_content:
             variables[current_section] = '\n'.join(section_content)
             
@@ -84,18 +81,17 @@ def optimize_resume_content(template_vars: Dict[str, str], job_description: str)
         print("Template variables:", json.dumps(template_vars, indent=2))
         print("Job description:", job_description)
         
-        system_prompt = """You are an expert ATS resume optimizer. Your task is to optimize the resume content while maintaining the exact format:
-        1. Return ONLY a valid JSON object with the same keys as input
-        2. For each section:
-           - Keep exact format (bullets, spacing)
-           - Add relevant keywords from job description
-           - Use industry terms
-           - Include metrics
-           - Use action verbs
-           - Keep same number of lines
-           - Keep dates and company names
-        3. DO NOT change structure or formatting
-        4. Focus on relevant skills and natural keyword integration"""
+        # Construct a more specific prompt for Gemini
+        system_prompt = """You are an expert ATS resume optimizer. Analyze the resume content and job description, then return an optimized version that:
+        1. Maintains the exact same structure and format as the input resume
+        2. Integrates relevant keywords from the job description naturally
+        3. Emphasizes matching skills and experiences
+        4. Uses strong action verbs
+        5. Includes metrics where possible
+        6. Preserves all dates and company names
+        
+        Return ONLY a valid JSON object with the exact same keys as the input resume, containing the optimized content.
+        Do not add or remove any sections."""
 
         # Validate input data
         if not template_vars or not job_description:
@@ -104,7 +100,19 @@ def optimize_resume_content(template_vars: Dict[str, str], job_description: str)
         try:
             print("Making Gemini API call...")
             model = genai.GenerativeModel('gemini-pro')
-            prompt = f"{system_prompt}\n\nOriginal Resume:\n{json.dumps(template_vars, ensure_ascii=False)}\n\nJob Description:\n{job_description}"
+            
+            # Create a more structured prompt
+            prompt = f"""
+            {system_prompt}
+
+            Original Resume Content:
+            {json.dumps(template_vars, ensure_ascii=False, indent=2)}
+
+            Job Description:
+            {job_description}
+
+            Please optimize the resume content while maintaining the exact same JSON structure.
+            """
             
             response = model.generate_content(prompt)
             print("Gemini API response received")
@@ -113,10 +121,23 @@ def optimize_resume_content(template_vars: Dict[str, str], job_description: str)
             if not response.text:
                 raise ValueError("Empty response from Gemini API")
             
+            # Extract JSON from response
             try:
-                optimized_content = json.loads(response.text)
+                # Find JSON content within the response
+                json_str = response.text
+                if '```json' in json_str:
+                    json_str = json_str.split('```json')[1].split('```')[0]
+                elif '```' in json_str:
+                    json_str = json_str.split('```')[1].split('```')[0]
+                
+                optimized_content = json.loads(json_str.strip())
                 if not isinstance(optimized_content, dict):
                     raise ValueError("Response is not a valid JSON object")
+                
+                # Verify all original keys are present
+                missing_keys = set(template_vars.keys()) - set(optimized_content.keys())
+                if missing_keys:
+                    raise ValueError(f"Missing keys in optimized content: {missing_keys}")
                 
                 print("Successfully parsed optimized content")
                 return optimized_content
@@ -169,9 +190,11 @@ async def process_resume(
                 detail=f"Failed to read document: {str(e)}"
             )
         
+        # Extract and optimize content
         template_vars = extract_template_variables(doc)
         optimized_vars = optimize_resume_content(template_vars, job_description)
         
+        # Render optimized content
         template_doc.render(optimized_vars)
         
         output = BytesIO()
@@ -182,15 +205,16 @@ async def process_resume(
         filename = re.sub(r'[^\w\-\.]', '_', file.filename).strip('_').strip()
         
         try:
-            # Upload original resume
+            # Store original and optimized content
             original_path = f"original_{timestamp}_{filename}"
+            optimized_path = f"optimized_{timestamp}_{filename}"
+            
+            # Upload files to Supabase storage
             supabase.storage.from_("resume_templates").upload(
                 original_path,
                 content
             )
             
-            # Upload optimized resume
-            optimized_path = f"optimized_{timestamp}_{filename}"
             supabase.storage.from_("resume_templates").upload(
                 optimized_path,
                 output.getvalue()
