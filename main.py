@@ -68,12 +68,13 @@ def extract_template_variables(doc: Document) -> Dict[str, str]:
         if current_section and section_content:
             variables[current_section] = '\n'.join(section_content)
             
+        print("Extracted variables:", variables)
         return variables
     except Exception as e:
         print(f"Error extracting template variables: {str(e)}")
         raise HTTPException(
             status_code=500,
-            detail="Failed to process resume template. Please ensure the document is properly formatted."
+            detail=f"Failed to process resume template: {str(e)}"
         )
 
 def optimize_resume_content(template_vars: Dict[str, str], job_description: str) -> Dict[str, str]:
@@ -95,9 +96,10 @@ def optimize_resume_content(template_vars: Dict[str, str], job_description: str)
         4. Focus on relevant skills and natural keyword integration"""
 
         print("Sending request to OpenAI with template vars:", template_vars_json)
+        print("Job description:", job_description)
         
         response = client.chat.completions.create(
-            model="gpt-4",
+            model="gpt-4o",  # Using the recommended model
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": f"Original Resume:\n{template_vars_json}\n\nJob Description:\n{job_description}"}
@@ -112,6 +114,7 @@ def optimize_resume_content(template_vars: Dict[str, str], job_description: str)
         # Parse the response content as JSON
         try:
             optimized_content = json.loads(response_content)
+            print("Successfully parsed optimized content")
         except json.JSONDecodeError as e:
             print(f"JSON parsing error: {str(e)}")
             print(f"Response content that failed to parse: {response_content}")
@@ -123,11 +126,13 @@ def optimize_resume_content(template_vars: Dict[str, str], job_description: str)
         # Validate and maintain structure
         for key in template_vars.keys():
             if key not in optimized_content:
+                print(f"Missing key in optimized content: {key}")
                 optimized_content[key] = template_vars[key]
             else:
                 orig_lines = template_vars[key].split('\n')
                 opt_lines = optimized_content[key].split('\n')
                 if len(orig_lines) != len(opt_lines):
+                    print(f"Line count mismatch for {key}: original={len(orig_lines)}, optimized={len(opt_lines)}")
                     optimized_content[key] = template_vars[key]
                     
         return optimized_content
@@ -168,7 +173,7 @@ async def process_resume(
             print(f"Document processing error: {str(e)}")
             raise HTTPException(
                 status_code=400,
-                detail="Failed to read document. Please ensure it's a valid .docx file."
+                detail=f"Failed to read document: {str(e)}"
             )
         
         template_vars = extract_template_variables(doc)
