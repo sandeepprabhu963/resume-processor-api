@@ -14,6 +14,7 @@ from dotenv import load_dotenv
 from datetime import datetime
 import re
 from supabase import create_client
+import traceback
 
 load_dotenv()
 
@@ -61,8 +62,9 @@ def format_docx(doc: Document) -> Document:
                     ['summary', 'experience', 'education', 'skills', 'contact', 'objective'])):
                 
                 paragraph.style = doc.styles['Heading 1']
-                paragraph.runs[0].bold = True
-                paragraph.runs[0].font.size = Pt(14)
+                for run in paragraph.runs:
+                    run.bold = True
+                    run.font.size = Pt(14)
                 paragraph.paragraph_format.space_before = Pt(12)
                 paragraph.paragraph_format.space_after = Pt(4)
                 
@@ -75,7 +77,7 @@ def format_docx(doc: Document) -> Document:
         return doc
         
     except Exception as e:
-        print(f"Error in format_docx: {str(e)}")
+        print(f"Error in format_docx: {str(e)}\n{traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"Failed to format document: {str(e)}")
 
 def docx_to_json(doc: Document) -> Dict[str, Any]:
@@ -145,7 +147,7 @@ def docx_to_json(doc: Document) -> Dict[str, Any]:
         return json_data
         
     except Exception as e:
-        print(f"Error in docx_to_json: {str(e)}")
+        print(f"Error in docx_to_json: {str(e)}\n{traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"Failed to convert resume to JSON: {str(e)}")
 
 def json_to_docx(template_doc: DocxTemplate, json_data: Dict[str, Any]) -> BytesIO:
@@ -201,7 +203,7 @@ def json_to_docx(template_doc: DocxTemplate, json_data: Dict[str, Any]) -> Bytes
         return output
         
     except Exception as e:
-        print(f"Error in json_to_docx: {str(e)}")
+        print(f"Error in json_to_docx: {str(e)}\n{traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"Failed to convert to DOCX: {str(e)}")
 
 @app.post("/process-resume/")
@@ -243,7 +245,7 @@ async def process_resume(
             )
             print(f"Original JSON saved to: {original_json_path}")
         except Exception as e:
-            print(f"Error saving original JSON: {str(e)}")
+            print(f"Error saving original JSON: {str(e)}\n{traceback.format_exc()}")
             raise HTTPException(status_code=500, detail=f"Failed to save original JSON: {str(e)}")
         
         # Optimize JSON using Gemini
@@ -262,7 +264,16 @@ async def process_resume(
         
         try:
             response = model.generate_content(prompt)
-            optimized_json = json.loads(response.text)
+            response_text = response.text.strip()
+            
+            # Remove any markdown code block markers if present
+            response_text = re.sub(r'^```json\s*|\s*```$', '', response_text)
+            
+            try:
+                optimized_json = json.loads(response_text)
+            except json.JSONDecodeError as e:
+                print(f"Error parsing Gemini response: {str(e)}\nResponse text: {response_text}")
+                raise HTTPException(status_code=500, detail="Failed to parse optimized content")
             
             # Save optimized JSON
             optimized_json_path = f"optimized_{timestamp}_{filename}.json"
@@ -276,7 +287,7 @@ async def process_resume(
             print(f"Optimized JSON saved to: {optimized_json_path}")
             
         except Exception as e:
-            print(f"Error in optimization: {str(e)}")
+            print(f"Error in optimization: {str(e)}\n{traceback.format_exc()}")
             raise HTTPException(status_code=500, detail=f"Failed to optimize resume content: {str(e)}")
         
         # Convert optimized JSON back to DOCX
@@ -292,7 +303,7 @@ async def process_resume(
             }).execute()
             print("Optimization record stored in database")
         except Exception as e:
-            print(f"Error storing optimization record: {str(e)}")
+            print(f"Error storing optimization record: {str(e)}\n{traceback.format_exc()}")
         
         return StreamingResponse(
             output,
@@ -304,7 +315,7 @@ async def process_resume(
         )
         
     except Exception as e:
-        print(f"Processing error: {str(e)}")
+        print(f"Processing error: {str(e)}\n{traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/health")
