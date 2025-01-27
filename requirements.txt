@@ -10,3 +10,5 @@ httpx>=0.24.1,<0.26.0
 supabase==1.2.0
 spacy==3.5.3
 nltk==3.8.1
+setuptools>=65.5.1
+wheel>=0.38.0
