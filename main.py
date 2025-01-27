@@ -12,17 +12,6 @@ from dotenv import load_dotenv
 from datetime import datetime
 import re
 from supabase import create_client
-import nltk
-from nltk.tokenize import word_tokenize
-from nltk.corpus import stopwords
-
-# Initialize NLTK data
-try:
-    nltk.data.find('tokenizers/punkt')
-    nltk.data.find('corpora/stopwords')
-except LookupError:
-    nltk.download('punkt')
-    nltk.download('stopwords')
 
 load_dotenv()
 
@@ -50,16 +39,20 @@ if not supabase_url or not supabase_key:
 supabase = create_client(supabase_url, supabase_key)
 
 def analyze_text(text: str) -> Dict[str, Any]:
-    """Analyze text using NLTK for keyword extraction."""
-    tokens = word_tokenize(text.lower())
-    stop_words = set(stopwords.words('english'))
-    tokens = [token for token in tokens if token not in stop_words]
+    """Analyze text using regex patterns for keyword extraction."""
+    # Clean and tokenize text
+    words = re.findall(r'\b\w+\b', text.lower())
     
+    # Define common technical skills pattern
     skills_pattern = r'\b(?:Python|Java|SQL|AWS|Azure|GCP|Docker|Kubernetes|React|Angular|Vue|Node\.js|JavaScript|TypeScript|C\+\+|Ruby|PHP|HTML|CSS|REST|API|ML|AI|DevOps|CI/CD|Git|Agile|Scrum)\b'
     technical_skills = list(set(re.findall(skills_pattern, text, re.IGNORECASE)))
     
+    # Get unique words (excluding very common words)
+    common_words = {'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by'}
+    keywords = [word for word in set(words) if word not in common_words]
+    
     return {
-        'keywords': tokens[:50],  # Limit to top 50 keywords
+        'keywords': keywords[:50],  # Limit to top 50 keywords
         'technical_skills': technical_skills
     }
 
